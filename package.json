@@ -10,6 +10,8 @@
   "files": [
     "dist",
     "spec",
+    ".env.example",
+    "README.en.md",
     "README.md"
   ],
   "scripts": {
@@ -19,7 +21,8 @@
     "start": "node dist/index.js",
     "start:http": "node dist/index.js --http",
     "check": "tsc -p tsconfig.json --noEmit",
-    "verify": "node scripts/verify.mjs"
+    "verify": "node scripts/verify.mjs",
+    "prepare": "npm run build"
   },
   "keywords": [
     "mcp",
