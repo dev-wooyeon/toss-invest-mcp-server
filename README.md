@@ -1,40 +1,44 @@
 # toss-invest-mcp-server
 
-MCP server for the official Toss Securities Open API. v1.0 exposes both low-level OpenAPI tools and higher-level ChatGPT-friendly workflows for market context, portfolio context, order preflight, and dry-run order preparation.
+[한국어](README.md) | [English](README.en.md)
 
-The bundled API source is the official OpenAPI document from:
+토스증권 공식 Open API를 ChatGPT, Codex, Claude Desktop 같은 MCP 클라이언트에서 안전하게 사용하기 위한 MCP 서버입니다.
+
+v1.0은 공식 OpenAPI 엔드포인트를 1:1 MCP 도구로 노출하는 것에 더해, 시세 컨텍스트, 포트폴리오 컨텍스트, 주문 사전 점검, 주문 dry-run 같은 상위 워크플로우 도구를 제공합니다.
+
+번들된 API 기준 문서는 다음 공식 자료입니다.
 
 - https://developers.tossinvest.com/llms.txt
 - https://openapi.tossinvest.com/openapi-docs/overview.md
 - https://openapi.tossinvest.com/openapi-docs/latest/openapi.json
 
-## Security model
+## 보안 모델
 
-Users must issue their own Toss Invest Open API `ClientId` and `Secret`.
+사용자는 토스증권 Open API `ClientId`와 `Secret`을 직접 발급받아야 합니다.
 
-This server does not collect, persist, print, or return `ClientId`, `Secret`, access tokens, or the default `accountSeq` environment value through metadata tools. Credentials are read only from the MCP server process environment:
+이 서버는 `ClientId`, `Secret`, access token, 기본 `accountSeq` 환경변수 값을 수집, 저장, 출력, 반환하지 않습니다. 인증 정보는 MCP 서버 프로세스의 환경변수에서만 읽습니다.
 
 - `TOSSINVEST_CLIENT_ID`
 - `TOSSINVEST_CLIENT_SECRET`
-- `TOSSINVEST_ACCOUNT` optional default accountSeq
+- `TOSSINVEST_ACCOUNT`: 선택값. 계좌 API 호출 시 기본 accountSeq로 사용
 
-OAuth access tokens are cached in memory only.
+OAuth access token은 메모리에만 캐시됩니다.
 
-Live order creation, modification, and cancellation are disabled by default. The supported modes are:
+실제 주문 생성, 정정, 취소는 기본적으로 비활성화되어 있습니다. 지원 모드는 다음과 같습니다.
 
-- `READ_ONLY`: default. Read tools and dry-run/preflight tools only.
-- `DRY_RUN`: order preparation workflows are allowed, but live order endpoints remain blocked.
-- `LIVE_TRADING`: live create/modify/cancel endpoints can execute, with per-call `confirmTrading: true` and local policy checks.
+- `READ_ONLY`: 기본값. 조회 도구와 preflight/dry-run 도구만 사용합니다.
+- `DRY_RUN`: 주문 준비 워크플로우는 허용하지만 실제 주문 엔드포인트는 차단합니다.
+- `LIVE_TRADING`: 실제 주문 생성, 정정, 취소 엔드포인트 호출을 허용합니다. 각 호출마다 `confirmTrading: true`와 로컬 정책 검사를 요구합니다.
 
-To enable live trading, the server process must set:
+실제 주문을 활성화하려면 서버 프로세스에 다음 값을 명시해야 합니다.
 
 ```bash
 TOSSINVEST_TRADING_MODE=LIVE_TRADING
 ```
 
-Every trading mutation tool also requires `confirmTrading: true` in the tool input.
+모든 실제 주문 mutation 도구는 입력값에 `confirmTrading: true`도 요구합니다.
 
-The live order policy can require idempotency keys, symbol allow/block lists, notional limits, and market-order restrictions:
+실제 주문 정책은 다음 환경변수로 제한할 수 있습니다.
 
 - `TOSSINVEST_ALLOWED_SYMBOLS`
 - `TOSSINVEST_BLOCKED_SYMBOLS`
@@ -43,9 +47,9 @@ The live order policy can require idempotency keys, symbol allow/block lists, no
 - `TOSSINVEST_REQUIRE_CLIENT_ORDER_ID`
 - `TOSSINVEST_ALLOW_MARKET_ORDER_WITHOUT_PRICE`
 
-Audit logging is local JSONL and enabled by default at `audit/toss-invest-mcp-audit.jsonl`. It does not log ClientId, Secret, access tokens, or raw account values.
+감사 로그는 로컬 JSONL 파일로 남으며 기본 경로는 `audit/toss-invest-mcp-audit.jsonl`입니다. 감사 로그에는 ClientId, Secret, access token, 원본 계좌 값이 기록되지 않습니다.
 
-## Install
+## 설치
 
 ```bash
 npm install
@@ -53,17 +57,17 @@ npm run build
 npm run verify
 ```
 
-## Environment
+## 환경변수
 
-The server automatically loads `.env`, `.env.local`, and an optional file pointed to by `TOSSINVEST_ENV_FILE` at startup. Shell or MCP-client-provided environment variables take precedence over file values. Do not commit real values.
+서버는 시작 시 `.env`, `.env.local`, `TOSSINVEST_ENV_FILE`로 지정한 파일을 자동으로 읽습니다. 셸이나 MCP 클라이언트 설정에서 이미 전달한 환경변수가 있으면 파일 값보다 우선합니다. 실제 키는 커밋하지 마세요.
 
-Recommended local setup:
+권장 로컬 설정:
 
 ```bash
 cp .env.example .env.local
 ```
 
-Then edit `.env.local`:
+그 다음 `.env.local`을 수정합니다.
 
 ```bash
 TOSSINVEST_CLIENT_ID="..."
@@ -72,15 +76,15 @@ TOSSINVEST_ACCOUNT="1"
 TOSSINVEST_TRADING_MODE="READ_ONLY"
 ```
 
-`.env.local` is ignored by git.
+`.env.local`은 git ignore 처리되어 있습니다.
 
-## Run over stdio
+## stdio 실행
 
 ```bash
 npm start
 ```
 
-Example MCP client configuration:
+MCP 클라이언트 설정 예시:
 
 ```json
 {
@@ -102,9 +106,9 @@ Example MCP client configuration:
 }
 ```
 
-## Run over Streamable HTTP
+## Streamable HTTP 실행
 
-Use this for MCP clients that connect to an HTTP MCP endpoint. For remote exposure, set `MCP_HTTP_BEARER_TOKEN` and run a self-hosted single-user instance.
+HTTP MCP endpoint가 필요한 클라이언트에서 사용합니다. 원격으로 노출할 경우 `MCP_HTTP_BEARER_TOKEN`을 설정하고, 단일 사용자 self-host 환경에서만 운영하는 것을 권장합니다.
 
 ```bash
 MCP_HTTP_BEARER_TOKEN="change-me" npm run start:http
@@ -117,15 +121,15 @@ POST http://localhost:3000/mcp
 Authorization: Bearer change-me
 ```
 
-## Tools
+## 도구
 
-Metadata tools:
+메타데이터 도구:
 
 - `toss_invest_auth_status`
 - `toss_invest_list_operations`
 - `toss_invest_get_operation`
 
-High-level workflow tools:
+상위 워크플로우 도구:
 
 - `toss_invest_stock_snapshot`
 - `toss_invest_market_status`
@@ -134,7 +138,7 @@ High-level workflow tools:
 - `toss_invest_order_preflight`
 - `toss_invest_create_order_dry_run`
 
-API call tools are generated from the bundled OpenAPI operation IDs:
+번들된 OpenAPI operationId 기반 API 호출 도구:
 
 - `toss_invest_get_orderbook`
 - `toss_invest_get_prices`
@@ -157,18 +161,19 @@ API call tools are generated from the bundled OpenAPI operation IDs:
 - `toss_invest_modify_order`
 - `toss_invest_cancel_order`
 
-The OAuth token endpoint is not exposed as a tool. The server handles token issuance internally.
+OAuth token 발급 엔드포인트는 도구로 노출하지 않습니다. 서버 내부에서만 토큰을 발급하고 캐시합니다.
 
-## Reliability behavior
+## 안정성 동작
 
-- 429 and 5xx responses retry with bounded exponential backoff.
-- `Retry-After` is respected when present.
-- Toss error envelopes are normalized into `error` with `status`, `code`, `message`, `requestId`, and `retryAfter`.
-- OpenAPI query/path inputs enforce enum, regex pattern, and min/max constraints where available.
+- 429와 5xx 응답은 제한된 지수 백오프로 재시도합니다.
+- `Retry-After` 헤더가 있으면 우선 적용합니다.
+- Toss 에러 envelope은 `status`, `code`, `message`, `requestId`, `retryAfter`를 포함한 `error` 객체로 정규화합니다.
+- OpenAPI query/path 입력값은 enum, regex pattern, min/max 제약을 가능한 범위에서 검증합니다.
+- 토스증권 Open API는 client당 유효 access token이 1개이므로, 동시 요청 시 OAuth 토큰 발급은 single-flight로 한 번만 수행합니다.
 
-## Example calls
+## 호출 예시
 
-Current price:
+현재가 조회:
 
 ```json
 {
@@ -176,7 +181,7 @@ Current price:
 }
 ```
 
-Holdings with default account from `TOSSINVEST_ACCOUNT`:
+`TOSSINVEST_ACCOUNT` 기본 계좌로 보유 종목 조회:
 
 ```json
 {
@@ -184,7 +189,7 @@ Holdings with default account from `TOSSINVEST_ACCOUNT`:
 }
 ```
 
-Holdings with explicit account:
+명시 계좌로 보유 종목 조회:
 
 ```json
 {
@@ -193,7 +198,30 @@ Holdings with explicit account:
 }
 ```
 
-Create order, only when live trading is intentionally enabled:
+주문 dry-run. `READ_ONLY` 모드에서도 안전합니다.
+
+```json
+{
+  "accountSeq": 1,
+  "body": {
+    "clientOrderId": "my-order-001",
+    "symbol": "005930",
+    "side": "BUY",
+    "orderType": "LIMIT",
+    "quantity": "10",
+    "price": "70000"
+  }
+}
+```
+
+dry-run 응답에는 다음 정보가 포함됩니다.
+
+- `executed: false`
+- `preflight.policy`
+- `preflight.summary.readyForLiveOrder`
+- 종목 정보, 현재가, 상하한가, 매수 가능 금액, 수수료, 장 운영 정보, 미체결 주문 같은 지원 API 점검 결과
+
+실제 주문은 `LIVE_TRADING` 모드에서 의도적으로 활성화한 경우에만 사용하세요.
 
 ```json
 {
@@ -210,32 +238,9 @@ Create order, only when live trading is intentionally enabled:
 }
 ```
 
-Dry-run order preparation, safe in `READ_ONLY` mode:
+## 실제 주문 체크리스트
 
-```json
-{
-  "accountSeq": 1,
-  "body": {
-    "clientOrderId": "my-order-001",
-    "symbol": "005930",
-    "side": "BUY",
-    "orderType": "LIMIT",
-    "quantity": "10",
-    "price": "70000"
-  }
-}
-```
-
-The dry-run response includes:
-
-- `executed: false`
-- `preflight.policy`
-- `preflight.summary.readyForLiveOrder`
-- supporting API checks such as stock info, current price, price limits, buying power, commissions, market calendar, and open orders
-
-## Live trading checklist
-
-Before setting `TOSSINVEST_TRADING_MODE=LIVE_TRADING`, configure at least:
+`TOSSINVEST_TRADING_MODE=LIVE_TRADING`을 설정하기 전에 최소한 다음 정책을 먼저 정하세요.
 
 ```bash
 TOSSINVEST_REQUIRE_CLIENT_ORDER_ID=true
@@ -245,9 +250,9 @@ TOSSINVEST_BLOCKED_SYMBOLS=
 TOSSINVEST_ALLOWED_SYMBOLS=
 ```
 
-For each live order call, pass `confirmTrading: true`. For high-value KRW orders, Toss Invest also requires `confirmHighValueOrder: true` in the order body.
+각 실제 주문 호출에는 `confirmTrading: true`를 전달해야 합니다. KRW 기준 고액 주문은 토스증권 API 요구사항에 따라 주문 body에 `confirmHighValueOrder: true`도 필요합니다.
 
-## Refresh OpenAPI spec
+## OpenAPI 스펙 갱신
 
 ```bash
 curl -fsSL https://openapi.tossinvest.com/openapi-docs/latest/openapi.json -o spec/openapi.json
