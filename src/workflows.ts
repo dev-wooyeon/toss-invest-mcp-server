@@ -179,19 +179,22 @@ export async function orderPreflight(
   const order = parseOrderDraft(args.body);
   const accountArgs = accountInput(args.accountSeq);
   const symbolArgs = { symbol: order.symbol };
-  const currency = currencyForSymbol(order.symbol);
+  const [stock, price] = await Promise.all([
+    callApi(context.client, "getStocks", { symbols: order.symbol }),
+    callApi(context.client, "getPrices", { symbols: order.symbol }),
+  ]);
+  const quote = referenceQuote(price.result, order.symbol);
+  const requestCurrency = quote?.currency ?? currencyForSymbol(order.symbol);
 
-  const [stock, price, priceLimit, warnings, commissions, buyingPower, sellableQuantity, calendar, openOrders] =
+  const [priceLimit, warnings, commissions, buyingPower, sellableQuantity, calendar, openOrders] =
     await Promise.all([
-      callApi(context.client, "getStocks", { symbols: order.symbol }),
-      callApi(context.client, "getPrices", { symbols: order.symbol }),
       callApi(context.client, "getPriceLimit", symbolArgs),
       callApi(context.client, "getStockWarnings", symbolArgs),
       callApi(context.client, "getCommissions", accountArgs),
       order.side === "BUY"
-        ? callApi(context.client, "getBuyingPower", {
+          ? callApi(context.client, "getBuyingPower", {
             ...accountArgs,
-            currency,
+            currency: requestCurrency,
           })
         : Promise.resolve(undefined),
       order.side === "SELL"
@@ -200,10 +203,12 @@ export async function orderPreflight(
             symbol: order.symbol,
           })
         : Promise.resolve(undefined),
-      callApi(
-        context.client,
-        currency === "KRW" ? "getKrMarketCalendar" : "getUsMarketCalendar",
-        {},
+        callApi(
+          context.client,
+          requestCurrency === "KRW"
+            ? "getKrMarketCalendar"
+            : "getUsMarketCalendar",
+          {},
       ),
       args.includeOpenOrders === false
         ? Promise.resolve(undefined)
@@ -214,10 +219,13 @@ export async function orderPreflight(
           }),
     ]);
 
-  const referencePrice = lastPrice(price.body);
+  const referencePrice = quote?.price;
   const policy = evaluateOrderPolicy(context.config, order, {
-    liveExecution: false,
+    liveExecution: true,
     referencePrice,
+    referenceCurrency: quote?.currency,
+    enforceTradingMode: false,
+    requireClientOrderId: true,
   });
   const checks = {
     stock,
@@ -233,20 +241,32 @@ export async function orderPreflight(
   const requiredChecks = [
     stock,
     price,
+    priceLimit,
+    warnings,
     commissions,
     calendar,
+    openOrders,
     order.side === "BUY" ? buyingPower : sellableQuantity,
   ].filter(Boolean) as ApiCallResult[];
   const failedRequiredChecks = requiredChecks.filter((check) => !check.ok);
-  const failedOptionalChecks = [priceLimit, warnings, openOrders].filter(
-    (check): check is ApiCallResult => Boolean(check && !check.ok),
+  const semanticIssues = preflightSemanticIssues(
+    order,
+    policy,
+    checks,
+    quote?.currency,
   );
+  if (args.includeOpenOrders === false) {
+    semanticIssues.push(
+      "Open-order validation was skipped; live-order readiness cannot be confirmed.",
+    );
+  }
   const blockingIssues = [
     ...policy.errors,
     ...failedRequiredChecks.map(
       (check) =>
         `${check.operationId} failed: ${apiFailureSummary(check)}`,
     ),
+    ...semanticIssues,
   ];
 
   return {
@@ -254,16 +274,10 @@ export async function orderPreflight(
     policy,
     summary: {
       apiChecksOk: failedRequiredChecks.length === 0,
-      readyForLiveOrder:
-        policy.allowed && failedRequiredChecks.length === 0,
+      semanticChecksOk: semanticIssues.length === 0,
+      readyForLiveOrder: blockingIssues.length === 0,
       blockingIssues,
-      optionalCheckWarnings: [
-        ...policy.warnings,
-        ...failedOptionalChecks.map(
-          (check) =>
-            `${check.operationId} failed: ${apiFailureSummary(check)}`,
-        ),
-      ],
+      optionalCheckWarnings: policy.warnings,
     },
     referencePrice,
     checks,
@@ -357,6 +371,231 @@ function apiFailureSummary(check: ApiCallResult) {
   return check.status ? `HTTP ${check.status}` : "unknown API error";
 }
 
+function preflightSemanticIssues(
+  order: OrderDraft,
+  policy: ReturnType<typeof evaluateOrderPolicy>,
+  checks: {
+    stock: ApiCallResult;
+    price: ApiCallResult;
+    priceLimit: ApiCallResult;
+    warnings: ApiCallResult;
+    commissions: ApiCallResult;
+    buyingPower?: ApiCallResult;
+    sellableQuantity?: ApiCallResult;
+    calendar: ApiCallResult;
+    openOrders?: ApiCallResult;
+  },
+  referenceCurrency?: "KRW" | "USD",
+) {
+  const issues: string[] = [];
+  if ([checks.stock, checks.price, checks.priceLimit, checks.warnings, checks.commissions, checks.calendar]
+    .some((check) => !check.ok)) {
+    return issues;
+  }
+
+  const stockRows = Array.isArray(checks.stock.result)
+    ? checks.stock.result.filter(isRecord)
+    : [];
+  const matchingStocks = stockRows.filter(
+    (item) => stringOrUndefined(item.symbol)?.toUpperCase() === order.symbol,
+  );
+  const stock = matchingStocks.length === 1 ? matchingStocks[0] : undefined;
+  if (
+    !Array.isArray(checks.stock.result) ||
+    stockRows.length !== checks.stock.result.length ||
+    !stock
+  ) {
+    issues.push(`Stock lookup did not return the requested symbol ${order.symbol}.`);
+  } else if (stringOrUndefined(stock.status) !== "ACTIVE") {
+    issues.push(`Symbol ${order.symbol} is not ACTIVE.`);
+  } else if (
+    !referenceCurrency ||
+    stringOrUndefined(stock.currency) !== referenceCurrency
+  ) {
+    issues.push(`Stock lookup returned an invalid currency for ${order.symbol}.`);
+  } else {
+    const marketDetail = recordOrUndefined(stock.koreanMarketDetail);
+    if (marketDetail?.liquidationTrading === true) {
+      issues.push(`Symbol ${order.symbol} is in liquidation trading.`);
+    }
+    if (
+      marketDetail?.krxTradingSuspended === true ||
+      marketDetail?.nxtTradingSuspended === true
+    ) {
+      issues.push(`Symbol ${order.symbol} has a suspended Korean market venue.`);
+    }
+  }
+
+  const quote = referenceQuote(checks.price.result, order.symbol);
+  if (!quote || quote.currency !== referenceCurrency) {
+    issues.push(
+      `Price lookup did not return one valid ${order.symbol} quote with a supported currency.`,
+    );
+  }
+
+  const warningRows = arrayRecords(checks.warnings.result);
+  if (
+    !Array.isArray(checks.warnings.result) ||
+    warningRows.length !== checks.warnings.result.length
+  ) {
+    issues.push("Stock-warning response was malformed.");
+  } else if (warningRows.length) {
+    const warningTypes = warningRows
+      .map((item) => stringOrUndefined(item.warningType) ?? "UNKNOWN")
+      .join(", ");
+    issues.push(`Symbol ${order.symbol} has active stock warnings: ${warningTypes}.`);
+  }
+
+  const limits = recordOrUndefined(checks.priceLimit.result);
+  const limitCurrency = stringOrUndefined(limits?.currency);
+  const hasLimitFields = Boolean(
+    limits &&
+    "lowerLimitPrice" in limits &&
+    "upperLimitPrice" in limits,
+  );
+  if (!limits || limitCurrency !== referenceCurrency || !hasLimitFields) {
+    issues.push("Price-limit response was malformed or used the wrong currency.");
+  } else if (referenceCurrency === "KRW") {
+    const lower = numberOrUndefined(limits.lowerLimitPrice);
+    const upper = numberOrUndefined(limits.upperLimitPrice);
+    if (lower === undefined || upper === undefined) {
+      issues.push("KR price-limit response did not contain numeric bounds.");
+    }
+  }
+
+  if (order.orderType === "LIMIT" && order.price && limits) {
+    const price = Number(order.price);
+    const lower = numberOrUndefined(limits?.lowerLimitPrice);
+    const upper = numberOrUndefined(limits?.upperLimitPrice);
+    if (lower !== undefined && price < lower) {
+      issues.push(`Order price ${order.price} is below lower limit ${lower}.`);
+    }
+    if (upper !== undefined && price > upper) {
+      issues.push(`Order price ${order.price} is above upper limit ${upper}.`);
+    }
+  }
+
+  const commissionRows = arrayRecords(checks.commissions.result);
+  const marketCountry = referenceCurrency === "KRW" ? "KR" : "US";
+  const matchingCommission = commissionRows.find(
+    (item) =>
+      stringOrUndefined(item.marketCountry) === marketCountry &&
+      numberOrUndefined(item.commissionRate) !== undefined,
+  );
+  if (
+    !Array.isArray(checks.commissions.result) ||
+    commissionRows.length !== checks.commissions.result.length ||
+    !matchingCommission
+  ) {
+    issues.push(`Commission response did not contain a valid ${marketCountry} rate.`);
+  }
+
+  if (order.side === "BUY" && checks.buyingPower?.ok) {
+    const buyingPower = recordOrUndefined(checks.buyingPower.result);
+    const buyingPowerCurrency = stringOrUndefined(buyingPower?.currency);
+    const available = numberOrUndefined(
+      buyingPower?.cashBuyingPower ?? buyingPower?.amount,
+    );
+    const estimatedNotional = policy.estimatedNotional;
+    const required = estimatedNotional &&
+      estimatedNotional.currency === referenceCurrency
+      ? numberOrUndefined(estimatedNotional.amount)
+      : undefined;
+    if (buyingPowerCurrency !== referenceCurrency || available === undefined) {
+      issues.push("Buying-power response used the wrong currency or had no usable amount.");
+    } else if (required === undefined) {
+      issues.push("Order notional could not be estimated for buying-power validation.");
+    } else if (available < required) {
+      issues.push(`Buying power ${available} is below estimated notional ${required}.`);
+    }
+  }
+
+  if (order.side === "SELL" && checks.sellableQuantity?.ok) {
+    const sellable = recordOrUndefined(checks.sellableQuantity.result);
+    const available = numberOrUndefined(sellable?.sellableQuantity);
+    const requested = numberOrUndefined(order.quantity);
+    if (available === undefined) {
+      issues.push("Sellable-quantity response did not contain a usable quantity.");
+    } else if (requested === undefined || available < requested) {
+      issues.push(`Sellable quantity ${available} is below requested quantity ${order.quantity}.`);
+    }
+  }
+
+  const regularOnly = Boolean(order.orderAmount) ||
+    Boolean(order.quantity?.includes("."));
+  if (!isMarketSessionOpen(checks.calendar.result, regularOnly)) {
+    issues.push(
+      regularOnly
+        ? "The regular market session is closed for this order type."
+        : "No supported market session is currently open.",
+    );
+  }
+
+  if (checks.openOrders?.ok) {
+    const result = recordOrUndefined(checks.openOrders.result);
+    const openOrders = Array.isArray(result?.orders)
+      ? result.orders.filter(isRecord)
+      : undefined;
+    if (
+      !openOrders ||
+      openOrders.length !== (result?.orders as unknown[] | undefined)?.length
+    ) {
+      issues.push("Open-order response was malformed.");
+    } else if (
+      openOrders.some(
+        (item) => stringOrUndefined(item.symbol)?.toUpperCase() !== order.symbol,
+      )
+    ) {
+      issues.push("Open-order response contained an unexpected symbol.");
+    } else if (openOrders.length) {
+      issues.push(`An open order already exists for symbol ${order.symbol}.`);
+    }
+  }
+
+  return issues;
+}
+
+function isMarketSessionOpen(value: unknown, regularOnly: boolean) {
+  const result = recordOrUndefined(value);
+  if (!result) {
+    return false;
+  }
+  const today = recordOrUndefined(result.today);
+  if (!today) {
+    return false;
+  }
+  const market = recordOrUndefined(today.integrated) ?? today;
+  const sessionNames = regularOnly
+    ? ["regularMarket"]
+    : ["dayMarket", "preMarket", "regularMarket", "afterMarket"];
+  const now = Date.now();
+  return sessionNames.some((name) => {
+    const session = recordOrUndefined(market[name]);
+    const start = session ? Date.parse(String(session.startTime ?? "")) : Number.NaN;
+    const end = session ? Date.parse(String(session.endTime ?? "")) : Number.NaN;
+    return Number.isFinite(start) && Number.isFinite(end) && start <= now && now <= end;
+  });
+}
+
+function firstRecord(value: unknown) {
+  return arrayRecords(value)[0] ?? recordOrUndefined(value);
+}
+
+function arrayRecords(value: unknown) {
+  return Array.isArray(value) ? value.filter(isRecord) : [];
+}
+
+function recordOrUndefined(value: unknown) {
+  return isRecord(value) ? value : undefined;
+}
+
+function numberOrUndefined(value: unknown) {
+  const parsed = Number(value);
+  return value !== undefined && value !== null && value !== "" && Number.isFinite(parsed)
+    ? parsed
+    : undefined;
+}
+
 function parseSymbols(value: string, max: number) {
   const symbols = value
     .split(",")
@@ -390,15 +629,29 @@ function extractResult(body: unknown) {
   return undefined;
 }
 
-function lastPrice(body: unknown) {
-  const result = extractResult(body);
-  if (Array.isArray(result) && isRecord(result[0])) {
-    return stringOrUndefined(result[0].lastPrice);
+function referenceQuote(value: unknown, symbol: string) {
+  if (!Array.isArray(value)) {
+    return undefined;
   }
-  if (isRecord(result)) {
-    return stringOrUndefined(result.lastPrice);
+  const matches = value.filter(
+    (item) =>
+      isRecord(item) &&
+      stringOrUndefined(item.symbol)?.toUpperCase() === symbol.toUpperCase(),
+  );
+  if (matches.length !== 1 || !isRecord(matches[0])) {
+    return undefined;
   }
-  return undefined;
+  const price = stringOrUndefined(matches[0].lastPrice);
+  const currency = stringOrUndefined(matches[0].currency);
+  if (
+    !price ||
+    !/^\d+(\.\d+)?$/.test(price) ||
+    Number(price) <= 0 ||
+    (currency !== "KRW" && currency !== "USD")
+  ) {
+    return undefined;
+  }
+  return { price, currency: currency as "KRW" | "USD" };
 }
 
 function extractHoldingsItems(body: unknown): Array<Record<string, unknown>> {

@@ -21,10 +21,27 @@ import {
   stockSnapshot,
 } from "./workflows.js";
 
-export function createServer() {
-  const config = getConfig();
-  const client = new TossInvestClient(config);
-  const audit = new AuditLogger(config);
+export type ServerDependencies = {
+  config: ReturnType<typeof getConfig>;
+  client: TossInvestClient;
+  audit: AuditLogger;
+};
+
+export function createServerDependencies(
+  env: NodeJS.ProcessEnv = process.env,
+): ServerDependencies {
+  const config = getConfig(env);
+  return {
+    config,
+    client: new TossInvestClient(config),
+    audit: new AuditLogger(config),
+  };
+}
+
+export function createServer(
+  dependencies: ServerDependencies = createServerDependencies(),
+) {
+  const { config, client, audit } = dependencies;
   const server = new McpServer({
     name: "toss-invest-mcp-server",
     version: "1.0.0",
@@ -143,7 +160,7 @@ function registerOperationTool(
     ? " Requires accountSeq input or TOSSINVEST_ACCOUNT in the server environment."
     : "";
   const tradingNote = record.isTradingMutation
-    ? " Live trading mutation: requires TOSSINVEST_ENABLE_TRADING=true and confirmTrading=true."
+    ? " Live trading mutation: requires TOSSINVEST_TRADING_MODE=LIVE_TRADING, a complete local trading policy, and confirmTrading=true."
     : "";
 
   server.registerTool(
@@ -168,17 +185,21 @@ function registerOperationTool(
       },
     },
     async (args) => {
-      await audit.write({
-        type: "tool_call",
-        tool: toolName,
-        operationId: record.operation.operationId,
-        details: audit.sanitizeArgs(args as CallArgs),
-      });
+      try {
+        await audit.write({
+          type: "tool_call",
+          tool: toolName,
+          operationId: record.operation.operationId,
+          details: audit.sanitizeArgs(args as CallArgs),
+        });
+      } catch {
+        return toolError("Audit logging failed; the API operation was not sent.");
+      }
 
       try {
         const response = await client.callOperation(record, args as CallArgs);
         const responseAudit = auditResponseDetails(response.headers);
-        await audit.write({
+        const auditLogged = await writeOutcomeAudit(audit, {
           type: "tool_result",
           tool: toolName,
           operationId: record.operation.operationId,
@@ -189,14 +210,16 @@ function registerOperationTool(
           details: {
             attempts: response.attempts,
             errorCode: response.error?.code,
+            outcomeUnknown: response.outcomeUnknown,
+            submissionPhase: response.submissionPhase,
           },
         });
         return response.ok
-          ? apiResult(response)
-          : apiResult(response, true);
+          ? apiResult(response, false, auditLogged)
+          : apiResult(response, true, auditLogged);
       } catch (error) {
         const message = redact(errorMessage(error), config);
-        await audit.write({
+        await writeOutcomeAudit(audit, {
           type: "tool_error",
           tool: toolName,
           operationId: record.operation.operationId,
@@ -377,14 +400,18 @@ async function auditedWorkflow(
   run: () => Promise<unknown>,
   successType: "tool_result" | "order_preflight" | "order_dry_run" = "tool_result",
 ) {
-  await audit.write({
-    type: "tool_call",
-    tool,
-    details: audit.sanitizeArgs(args),
-  });
+  try {
+    await audit.write({
+      type: "tool_call",
+      tool,
+      details: audit.sanitizeArgs(args),
+    });
+  } catch {
+    return toolError("Audit logging failed; the workflow was not started.");
+  }
   try {
     const result = await run();
-    await audit.write({
+    await writeOutcomeAudit(audit, {
       type: successType,
       tool,
       ok: true,
@@ -393,7 +420,7 @@ async function auditedWorkflow(
     return jsonResult(result);
   } catch (error) {
     const message = errorMessage(error);
-    await audit.write({
+    await writeOutcomeAudit(audit, {
       type: "tool_error",
       tool,
       ok: false,
@@ -403,7 +430,11 @@ async function auditedWorkflow(
   }
 }
 
-function apiResult(response: TossResponse, isError = false) {
+function apiResult(
+  response: TossResponse,
+  isError = false,
+  auditLogged = true,
+) {
   const payload = {
     status: response.status,
     statusText: response.statusText,
@@ -411,6 +442,14 @@ function apiResult(response: TossResponse, isError = false) {
     body: response.body,
     error: response.error,
     attempts: response.attempts,
+    outcomeUnknown: response.outcomeUnknown,
+    submissionPhase: response.submissionPhase,
+    ...(auditLogged
+      ? {}
+      : {
+          auditWarning:
+            "The API outcome is authoritative, but the post-call audit record could not be written.",
+        }),
   };
 
   return {
@@ -423,6 +462,19 @@ function apiResult(response: TossResponse, isError = false) {
     ],
     structuredContent: payload,
   };
+}
+
+async function writeOutcomeAudit(
+  audit: AuditLogger,
+  event: Parameters<AuditLogger["write"]>[0],
+) {
+  try {
+    await audit.write(event);
+    return true;
+  } catch {
+    console.error("toss-invest-mcp-server could not write a post-call audit record");
+    return false;
+  }
 }
 
 function jsonResult(value: unknown) {

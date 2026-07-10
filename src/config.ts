@@ -85,15 +85,16 @@ function parseBoolean(value: string | undefined) {
 }
 
 function parseTradingMode(env: NodeJS.ProcessEnv): TradingMode {
-  if (parseBoolean(env.TOSSINVEST_ENABLE_TRADING)) {
-    return "LIVE_TRADING";
+  if (env.TOSSINVEST_TRADING_MODE !== undefined) {
+    const value = env.TOSSINVEST_TRADING_MODE.trim().toUpperCase();
+    if (value === "READ_ONLY" || value === "DRY_RUN" || value === "LIVE_TRADING") {
+      return value;
+    }
+    return "READ_ONLY";
   }
 
-  const value = (env.TOSSINVEST_TRADING_MODE ?? "READ_ONLY")
-    .trim()
-    .toUpperCase();
-  if (value === "READ_ONLY" || value === "DRY_RUN" || value === "LIVE_TRADING") {
-    return value;
+  if (parseBoolean(env.TOSSINVEST_ENABLE_TRADING)) {
+    return "LIVE_TRADING";
   }
   return "READ_ONLY";
 }
