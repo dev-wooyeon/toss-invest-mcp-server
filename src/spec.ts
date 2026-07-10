@@ -25,6 +25,8 @@ const HTTP_METHODS = new Set<HttpMethod>([
   "delete",
 ]);
 
+const INTERNAL_OPERATION_IDS = new Set(["issueOAuth2Token"]);
+
 export const operations = buildOperationIndex(openapi);
 
 export function getOperation(operationId: string): OperationRecord | undefined {
@@ -94,9 +96,15 @@ export function buildToolInputSchema(record: OperationRecord) {
 
   const requestBody = resolveRequestBody(record.operation.requestBody);
   if (requestBody) {
-    const bodySchema = z
-      .record(z.unknown())
-      .describe(requestBody.description ?? requestBodyDescription(requestBody));
+    const jsonSchema = requestBody.content?.["application/json"]?.schema;
+    const bodySchema = jsonSchema
+      ? zodFromJsonSchema(
+          jsonSchema,
+          requestBody.description ?? requestBodyDescription(requestBody),
+        )
+      : z
+          .record(z.unknown())
+          .describe(requestBody.description ?? requestBodyDescription(requestBody));
     shape.body = requestBody.required ? bodySchema : bodySchema.optional();
   }
 
@@ -104,7 +112,7 @@ export function buildToolInputSchema(record: OperationRecord) {
     shape.confirmTrading = z
       .literal(true)
       .describe(
-        "Must be true for live order creation, modification, or cancellation. The server also requires TOSSINVEST_ENABLE_TRADING=true.",
+        "Must be true for live trading mutations, including regular and conditional order creation, modification, or cancellation. The server also requires TOSSINVEST_TRADING_MODE=LIVE_TRADING and a complete local trading policy.",
       );
   }
 
@@ -121,7 +129,7 @@ export function listOperationSummaries() {
     tags: record.tags,
     rateLimitGroup: record.rateLimitGroup,
     requiresAccount: record.requiresAccount,
-    callable: record.operation.operationId !== "issueOAuth2Token",
+    callable: !INTERNAL_OPERATION_IDS.has(record.operation.operationId),
     tradingMutation: record.isTradingMutation,
   }));
 }
@@ -144,7 +152,9 @@ export function operationDetails(record: OperationRecord) {
     };
   });
 
-  const requestBody = resolveRequestBody(record.operation.requestBody);
+  const requestBody = expandRequestBodySchemas(
+    resolveRequestBody(record.operation.requestBody),
+  );
   const responseExamples = collectResponseExamples(record.operation);
 
   return {
@@ -203,11 +213,12 @@ function buildOperationIndex(doc: OpenApiDocument): OperationRecord[] {
             parameter.in === "header" &&
             parameter.name === "X-Tossinvest-Account",
         ),
-        isTradingMutation: [
-          "createOrder",
-          "modifyOrder",
-          "cancelOrder",
-        ].includes(operationId),
+        // OpenAPI operationIds are not a durable safety boundary: the official
+        // document can add new trading endpoints at any time. GET is the only
+        // method treated as read-only; every other callable method fails closed
+        // behind the live-trading and explicit-confirmation guards.
+        isTradingMutation:
+          !INTERNAL_OPERATION_IDS.has(operationId) && method !== "get",
       });
     }
   }
@@ -215,64 +226,277 @@ function buildOperationIndex(doc: OpenApiDocument): OperationRecord[] {
   return records;
 }
 
-function zodFromJsonSchema(schema: JsonSchema | undefined, description?: string) {
-  const resolved = schema?.$ref ? resolveRef<JsonSchema>(schema.$ref) : schema;
-  let result: z.ZodTypeAny;
+export function zodFromJsonSchema(
+  schema: JsonSchema | undefined,
+  description?: string,
+  resolvingRefs = new Set<string>(),
+): z.ZodTypeAny {
+  if (!schema) {
+    return description ? z.unknown().describe(description) : z.unknown();
+  }
 
-  if (resolved?.enum?.length && resolved.enum.every((item) => typeof item === "string")) {
-    const values = resolved.enum as string[];
-    result = values.length > 0 ? z.enum(values as [string, ...string[]]) : z.string();
+  if (schema.$ref) {
+    if (resolvingRefs.has(schema.$ref)) {
+      return z.unknown().describe(`Cyclic OpenAPI reference: ${schema.$ref}`);
+    }
+    const nextRefs = new Set(resolvingRefs).add(schema.$ref);
+    const resolved = resolveRef<JsonSchema>(schema.$ref);
+    return zodFromJsonSchema(
+      resolved,
+      description ?? schema.description,
+      nextRefs,
+    );
+  }
+
+  let result: z.ZodTypeAny;
+  if (schema.oneOf?.length) {
+    const branches = schema.oneOf.map((branch) =>
+      zodFromJsonSchema(branch, undefined, resolvingRefs),
+    );
+    result = exclusiveUnion(branches);
+  } else if (schema.anyOf?.length) {
+    result = unionSchemas(
+      schema.anyOf.map((branch) =>
+        zodFromJsonSchema(branch, undefined, resolvingRefs),
+      ),
+    );
   } else {
-    const type = Array.isArray(resolved?.type) ? resolved?.type[0] : resolved?.type;
-    switch (type) {
-      case "integer":
-        result = z.number().int();
-        if (resolved?.minimum !== undefined) {
-          result = (result as z.ZodNumber).min(resolved.minimum);
-        }
-        if (resolved?.maximum !== undefined) {
-          result = (result as z.ZodNumber).max(resolved.maximum);
-        }
-        break;
-      case "number":
-        result = z.number();
-        if (resolved?.minimum !== undefined) {
-          result = (result as z.ZodNumber).min(resolved.minimum);
-        }
-        if (resolved?.maximum !== undefined) {
-          result = (result as z.ZodNumber).max(resolved.maximum);
-        }
-        break;
-      case "boolean":
-        result = z.boolean();
-        break;
-      case "array":
-        result = z.array(z.unknown());
-        break;
-      case "object":
-        result = z.record(z.unknown());
-        break;
-      case "string":
-      default:
-        result = z.string();
-        if (resolved?.minLength !== undefined) {
-          result = (result as z.ZodString).min(resolved.minLength);
-        }
-        if (resolved?.maxLength !== undefined) {
-          result = (result as z.ZodString).max(resolved.maxLength);
-        }
-        if (resolved?.pattern) {
-          result = (result as z.ZodString).regex(new RegExp(resolved.pattern));
-        }
-        break;
+    result = zodFromSchemaType(schema, resolvingRefs);
+  }
+
+  if (schema.allOf?.length) {
+    const allOf = schema.allOf.map((branch) =>
+      zodFromJsonSchema(branch, undefined, resolvingRefs),
+    );
+    const hasOwnSchema = Boolean(
+      schema.type ||
+        schema.enum?.length ||
+        schema.properties ||
+        schema.items ||
+        schema.oneOf?.length ||
+        schema.anyOf?.length,
+    );
+    result = intersectSchemas(hasOwnSchema ? [result, ...allOf] : allOf);
+  }
+
+  if ((schema as JsonSchema & { nullable?: boolean }).nullable) {
+    result = result.nullable();
+  }
+  if (description || schema.description) {
+    result = result.describe(description ?? schema.description ?? "");
+  }
+  return result;
+}
+
+function zodFromSchemaType(
+  schema: JsonSchema,
+  resolvingRefs: Set<string>,
+): z.ZodTypeAny {
+  if (schema.enum?.length) {
+    const literals = schema.enum
+      .filter(isJsonLiteral)
+      .map((value) => z.literal(value));
+    if (literals.length) {
+      return unionSchemas(literals);
     }
   }
 
-  if (description || resolved?.description) {
-    result = result.describe(description ?? resolved?.description ?? "");
+  if (Array.isArray(schema.type)) {
+    return unionSchemas(
+      schema.type.map((type) =>
+        zodFromSchemaType({ ...schema, type }, resolvingRefs),
+      ),
+    );
   }
 
-  return result;
+  const type = schema.type ??
+    (schema.properties ? "object" : schema.items ? "array" : undefined);
+  switch (type) {
+    case "integer": {
+      let numberSchema = z.number().int();
+      if (schema.minimum !== undefined) {
+        numberSchema = numberSchema.min(schema.minimum);
+      }
+      if (schema.maximum !== undefined) {
+        numberSchema = numberSchema.max(schema.maximum);
+      }
+      return numberSchema;
+    }
+    case "number": {
+      let numberSchema = z.number();
+      if (schema.minimum !== undefined) {
+        numberSchema = numberSchema.min(schema.minimum);
+      }
+      if (schema.maximum !== undefined) {
+        numberSchema = numberSchema.max(schema.maximum);
+      }
+      return numberSchema;
+    }
+    case "boolean":
+      return z.boolean();
+    case "null":
+      return z.null();
+    case "array":
+      return z.array(
+        zodFromJsonSchema(schema.items, undefined, resolvingRefs),
+      );
+    case "object": {
+      const required = new Set(schema.required ?? []);
+      const shape: z.ZodRawShape = {};
+      for (const [name, property] of Object.entries(schema.properties ?? {})) {
+        const propertySchema = zodFromJsonSchema(
+          property,
+          undefined,
+          resolvingRefs,
+        );
+        shape[name] = required.has(name)
+          ? propertySchema
+          : propertySchema.optional();
+      }
+      return z.object(shape).passthrough();
+    }
+    case "string": {
+      let stringSchema = z.string();
+      if (schema.minLength !== undefined) {
+        stringSchema = stringSchema.min(schema.minLength);
+      }
+      if (schema.maxLength !== undefined) {
+        stringSchema = stringSchema.max(schema.maxLength);
+      }
+      if (schema.pattern) {
+        stringSchema = stringSchema.regex(new RegExp(schema.pattern));
+      }
+      if (schema.format === "date") {
+        stringSchema = stringSchema.date();
+      } else if (schema.format === "date-time") {
+        stringSchema = stringSchema.datetime({ offset: true });
+      }
+      return stringSchema;
+    }
+    default:
+      return z.unknown();
+  }
+}
+
+function exclusiveUnion(schemas: z.ZodTypeAny[]) {
+  const union = unionSchemas(schemas);
+  if (schemas.length <= 1) {
+    return union;
+  }
+  return union.superRefine((value, context) => {
+    const matches = schemas.filter((schema) => schema.safeParse(value).success);
+    if (matches.length !== 1) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Value must match exactly one OpenAPI oneOf branch.",
+      });
+    }
+  });
+}
+
+function unionSchemas(schemas: z.ZodTypeAny[]): z.ZodTypeAny {
+  if (!schemas.length) {
+    return z.never();
+  }
+  if (schemas.length === 1) {
+    return schemas[0];
+  }
+  return z.union(
+    schemas as [z.ZodTypeAny, z.ZodTypeAny, ...z.ZodTypeAny[]],
+  );
+}
+
+function intersectSchemas(schemas: z.ZodTypeAny[]): z.ZodTypeAny {
+  if (!schemas.length) {
+    return z.unknown();
+  }
+  return schemas.slice(1).reduce(
+    (combined, schema) => z.intersection(combined, schema),
+    schemas[0],
+  );
+}
+
+function expandRequestBodySchemas(
+  requestBody: OpenApiRequestBody | undefined,
+): OpenApiRequestBody | undefined {
+  if (!requestBody?.content) {
+    return requestBody;
+  }
+  return {
+    ...requestBody,
+    content: Object.fromEntries(
+      Object.entries(requestBody.content).map(([mediaType, media]) => [
+        mediaType,
+        {
+          ...media,
+          schema: media.schema
+            ? expandJsonSchema(media.schema)
+            : media.schema,
+        },
+      ]),
+    ),
+  };
+}
+
+function expandJsonSchema(
+  schema: JsonSchema,
+  resolvingRefs = new Set<string>(),
+): JsonSchema {
+  if (schema.$ref) {
+    if (resolvingRefs.has(schema.$ref)) {
+      return schema;
+    }
+    const nextRefs = new Set(resolvingRefs).add(schema.$ref);
+    const { $ref: _ref, ...siblings } = schema;
+    return {
+      ...expandJsonSchema(resolveRef<JsonSchema>(schema.$ref), nextRefs),
+      ...expandJsonSchema(siblings, nextRefs),
+    };
+  }
+
+  return {
+    ...schema,
+    ...(schema.properties
+      ? {
+          properties: Object.fromEntries(
+            Object.entries(schema.properties).map(([name, property]) => [
+              name,
+              expandJsonSchema(property, resolvingRefs),
+            ]),
+          ),
+        }
+      : {}),
+    ...(schema.items
+      ? { items: expandJsonSchema(schema.items, resolvingRefs) }
+      : {}),
+    ...(schema.allOf
+      ? {
+          allOf: schema.allOf.map((branch) =>
+            expandJsonSchema(branch, resolvingRefs),
+          ),
+        }
+      : {}),
+    ...(schema.oneOf
+      ? {
+          oneOf: schema.oneOf.map((branch) =>
+            expandJsonSchema(branch, resolvingRefs),
+          ),
+        }
+      : {}),
+    ...(schema.anyOf
+      ? {
+          anyOf: schema.anyOf.map((branch) =>
+            expandJsonSchema(branch, resolvingRefs),
+          ),
+        }
+      : {}),
+  };
+}
+
+function isJsonLiteral(
+  value: unknown,
+): value is string | number | boolean | null {
+  return value === null || ["string", "number", "boolean"].includes(typeof value);
 }
 
 function requestBodyDescription(requestBody: OpenApiRequestBody) {
