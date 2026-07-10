@@ -1,0 +1,448 @@
+{
+  "schemaVersion": 2,
+  "docType": "spec",
+  "id": "spec:2026-06-12-offline-safety-validation",
+  "slug": "2026-06-12-offline-safety-validation",
+  "status": "canonical",
+  "title": "Offline Safety Validation",
+  "description": "MCP 서버의 전체 OpenAPI 도구와 거래 안전 경계를 실제 Toss API 없이 검증하는 계약입니다.",
+  "owner": "toss-invest-mcp-server",
+  "createdAt": "2026-06-12",
+  "updatedAt": "2026-07-10",
+  "links": {
+    "sourceOfTruth": [
+      "AGENTS.md",
+      "package.json",
+      "spec/openapi.json",
+      "scripts/verify-offline.mjs",
+      "scripts/spcx-market-sell.mjs",
+      "test/safety.test.ts",
+      "test/openapi-coverage.test.ts",
+      "test/http-security.test.ts",
+      "test/spcx-market-sell.test.ts"
+    ],
+    "relatedPlans": [],
+    "relatedDecisions": []
+  },
+  "page": {
+    "humanSummary": "실제 주문이나 실제 Toss API 호출 없이 38개 MCP 도구와 주문 안전 경계를 반복 검증합니다.",
+    "agentSummary": "Run npm test and npm run verify:offline after changing OpenAPI registration, trading policy, auth refresh, preflight, or MCP startup. The offline harness must use dummy credentials, isolated cwd, and a loopback mock API only.",
+    "styleTemplate": "evidence-led"
+  },
+  "body": {
+    "goal": "토스증권 Open API 자격증명이나 외부 네트워크 호출 없이 OpenAPI 1.2.2의 전체 MCP 노출 계약, 인증 갱신, 필수 입력, 주문 차단, 주문 사전 점검을 검증합니다.",
+    "problem": "부분 도구만 확인하는 smoke test는 새 API 누락, 필수 query의 선택 처리, 새 주문 mutation의 READ_ONLY 우회, 모든 401에서의 불필요한 토큰 회전, 응답 의미를 읽지 않는 사전 점검을 검출하지 못합니다.",
+    "scope": {
+      "in": [
+        "OpenAPI 1.2.2의 callable operation 29개와 workflow 및 metadata 도구 9개의 정확한 목록",
+        "모든 required query parameter의 MCP input schema 계약",
+        "일반 주문과 조건주문 mutation 6개의 READ_ONLY 차단",
+        "invalid-token 401에서 빌드 산출물의 단일 토큰 갱신과 재호출",
+        "공식 응답 형태를 사용하는 주문 dry-run semantic readiness",
+        "실주문 batch의 통화별 검증, mutation 직전 재검증, 원자 lock과 실행 journal, 불확실 결과 보존",
+        "HTTP transport의 강한 bearer, loopback 기본값, exact-origin CORS, 요청 본문 한도",
+        "mutation의 ambiguous 429/5xx 무재시도와 post-call audit 실패 시 API 결과 보존"
+      ],
+      "out": [
+        "실제 Toss API 통합 테스트",
+        "LIVE_TRADING 주문 성공 테스트",
+        "사용자 계좌, 자격증명, 보유 종목 값 검증",
+        "투자 판단 또는 리밸런싱 추천 검증"
+      ]
+    },
+    "architecture": {
+      "summary": "단위 테스트는 TypeScript 소스를 직접 검증하고, offline harness는 빌드된 MCP stdio 서버를 임시 cwd에서 실행해 loopback mock API만 호출합니다.",
+      "flow": [
+        "npm test가 config, policy, audit, redaction, retry 경계를 검증합니다.",
+        "npm run verify:offline이 dist를 빌드하고 127.0.0.1 임의 포트에 mock API를 생성합니다.",
+        "MCP child는 부모의 TOSSINVEST_* 값을 상속하지 않고 dummy credential과 mock base URL만 받습니다.",
+        "listTools 결과는 지원 계약의 38개 도구와 정확히 일치해야 합니다.",
+        "dry-run preflight는 공식 1.2.2 응답 형태를 읽고 주문 가능 상태를 의미적으로 판정합니다.",
+        "6개 live mutation은 READ_ONLY에서 API 요청 이전에 모두 차단됩니다.",
+        "batch 테스트는 mock 응답만으로 통화별 calendar와 cap, 직전 재검증, lock, journal, outcome_unknown을 검증합니다.",
+        "HTTP 테스트는 32자 미만 token과 opt-in 없는 non-loopback bind를 거부하고 인증, CORS, body limit을 검증합니다."
+      ]
+    },
+    "requirements": [
+      {
+        "id": "REQ-1",
+        "title": "비밀값 격리",
+        "detail": "offline harness는 부모 프로세스의 실제 TOSSINVEST_CLIENT_ID, TOSSINVEST_CLIENT_SECRET, TOSSINVEST_ACCOUNT를 전달하거나 출력하지 않습니다.",
+        "acceptanceCriteria": [
+          "offlineEnv는 허용된 OS env와 dummy TOSSINVEST_* 값만 생성합니다.",
+          "MCP cwd는 임시 디렉터리라 저장소의 .env 및 .env.local을 읽지 않습니다.",
+          "auth status는 credential 존재 여부만 반환합니다."
+        ]
+      },
+      {
+        "id": "REQ-2",
+        "title": "전체 API 노출 계약",
+        "detail": "지원 목록은 OpenAPI 1.2.2의 auth 포함 30개 operation 중 callable 29개와 workflow 및 metadata 9개를 합친 38개 도구입니다.",
+        "acceptanceCriteria": [
+          "listTools 결과는 정렬된 38개 expected tool 목록과 정확히 일치합니다.",
+          "rankings, market indicator 3종, conditional order 조회 2종이 포함됩니다.",
+          "OAuth token operation은 직접 호출 도구로 노출되지 않습니다."
+        ]
+      },
+      {
+        "id": "REQ-3",
+        "title": "OpenAPI 입력 스키마 계약",
+        "detail": "OpenAPI의 required query와 request body의 $ref, allOf, oneOf, nested required, enum, array 구조를 MCP input schema에 보존해야 합니다.",
+        "acceptanceCriteria": [
+          "verify-offline이 spec/openapi.json의 모든 required query를 수집합니다.",
+          "각 query 이름은 대응 도구 inputSchema.required에 포함됩니다.",
+          "status 없는 getOrders 호출은 mock API 요청 전에 실패합니다.",
+          "createOrder의 수량·금액 oneOf와 조건주문의 중첩 required 및 enum이 listTools schema에 포함됩니다.",
+          "toss_invest_get_operation은 request body 내부의 local $ref를 해소한 스키마를 반환합니다."
+        ]
+      },
+      {
+        "id": "REQ-4",
+        "title": "거래 mutation fail-closed",
+        "detail": "일반 주문과 조건주문의 생성, 정정, 취소는 모두 명시적으로 trading mutation으로 분류되고 READ_ONLY에서 차단됩니다.",
+        "acceptanceCriteria": [
+          "createOrder, modifyOrder, cancelOrder가 LIVE_TRADING 오류로 실패합니다.",
+          "createConditionalOrder, modifyConditionalOrder, cancelConditionalOrder가 같은 오류로 실패합니다.",
+          "token endpoint 외 POST 요청은 mock request 목록에 없어야 합니다.",
+          "모든 trading mutation은 ambiguous 429/5xx를 자동 재시도하지 않습니다.",
+          "mutation의 429/5xx, 전송 중 transport 오류, 필수 ID가 없는 2xx는 outcomeUnknown과 submissionPhase를 응답 및 audit에 남깁니다.",
+          "API가 주문을 수락한 뒤 audit write가 실패해도 MCP 결과는 주문 성공을 유지하고 auditWarning을 표시합니다."
+        ]
+      },
+      {
+        "id": "REQ-5",
+        "title": "선별적 401 갱신",
+        "detail": "invalid-token 또는 expired-token만 토큰 재발급 대상으로 처리하고, 빌드된 MCP 경로에서 갱신 후 원 요청을 한 번 재호출합니다.",
+        "acceptanceCriteria": [
+          "mock getStocks가 첫 access token에 invalid-token 401을 한 번 반환합니다.",
+          "OAuth token 발급은 최초 발급과 갱신을 합쳐 두 번입니다.",
+          "getStocks는 두 번째 token으로 성공 재호출됩니다.",
+          "login-user-not-found 401은 token을 다시 발급하지 않습니다."
+        ]
+      },
+      {
+        "id": "REQ-6",
+        "title": "주문 readiness 의미 검증",
+        "detail": "HTTP 성공만으로 주문 가능 상태를 만들지 않고 종목 상태, 경고, 금액 또는 수량, 가격 범위, 장 세션, 미체결 주문을 평가합니다.",
+        "acceptanceCriteria": [
+          "mock buying power는 cashBuyingPower 필드를 사용합니다.",
+          "mock orders는 result.orders를 사용하고 calendar는 today.integrated session을 사용합니다.",
+          "모든 의미 조건이 충족된 dry-run만 readyForLiveOrder=true입니다.",
+          "빈 price, malformed warning/limit/order, 잘못된 buying-power currency가 HTTP 200이어도 readiness를 차단합니다."
+        ]
+      },
+      {
+        "id": "REQ-7",
+        "title": "실주문 batch 원자적 실행 경계",
+        "detail": "공개 코드에 실제 종목과 수량을 두지 않고 ignored plan file을 읽으며, PriceResponse.currency 기준 검증과 mutation 직전 재검증을 수행하고 audit 아래 원자 lock과 실행 journal로 중복 및 불확실 재실행을 차단합니다.",
+        "acceptanceCriteria": [
+          "명시적인 plan id 없이는 실행하지 않습니다.",
+          "같은 plan id와 symbol은 재실행에서도 같은 clientOrderId를 생성합니다.",
+          "KRW 가격은 국내 장과 KRW cap을, USD 가격은 미국 장과 USD cap을 사용합니다.",
+          "각 mutation 직전에 장 운영 시간, OPEN 주문, 매도 가능 수량, 현재가와 cap을 다시 검증합니다.",
+          "전역 및 plan lock과 최초 journal은 exclusive create로 생성됩니다.",
+          "완료, 진행 중, 부분 실패, outcome_unknown journal은 자동 재실행을 차단합니다.",
+          "부분 성공 뒤 throw가 발생해도 성공 결과와 현재 주문의 outcome_unknown을 출력과 journal에 모두 보존합니다.",
+          "createOrder 2xx에 orderId 또는 요청한 clientOrderId가 없으면 accepted로 보지 않고 outcome_unknown으로 중단합니다."
+        ]
+      },
+      {
+        "id": "REQ-8",
+        "title": "HTTP transport fail-closed",
+        "detail": "Streamable HTTP는 stdio의 선택 경로이며 충분히 긴 bearer와 loopback 기본 바인드를 강제하고 browser origin과 body 크기를 제한합니다.",
+        "acceptanceCriteria": [
+          "MCP_HTTP_BEARER_TOKEN이 없거나 32자 미만이면 시작하지 않습니다.",
+          "non-loopback host는 MCP_HTTP_ALLOW_INSECURE_EXTERNAL_BIND=true가 없으면 거부합니다.",
+          "wildcard CORS는 거부하고 정확히 허용된 origin만 응답 헤더에 반영합니다.",
+          "Content-Length와 chunked 요청 모두 설정된 body limit을 넘으면 413을 반환합니다."
+        ]
+      }
+    ],
+    "approaches": [
+      {
+        "name": "Mock API 기반 built stdio 검증",
+        "tradeoffs": [
+          "실제 빌드 산출물과 MCP tool 호출을 검증하므로 단위 테스트보다 통합 표면이 넓습니다.",
+          "실제 API 가용성은 검출하지 못하지만 credential과 주문 위험 없이 CI에서 반복할 수 있습니다."
+        ],
+        "recommendation": "기본 검증으로 유지하고 실제 API verify는 사용자가 의도한 수동 smoke 경로로 분리합니다."
+      },
+      {
+        "name": "정확한 목록과 동적 query 검사",
+        "tradeoffs": [
+          "정확한 목록은 누락과 의도하지 않은 노출을 즉시 검출합니다.",
+          "required query는 bundled OpenAPI에서 동적으로 수집해 신규 parameter도 자동 검증합니다."
+        ],
+        "recommendation": "tool 목록은 지원 정책으로 명시하고 query required 여부는 OpenAPI를 source of truth로 사용합니다."
+      }
+    ],
+    "components": [
+      {
+        "name": "scripts/verify-offline.mjs",
+        "responsibility": "mock Toss API와 built MCP stdio 서버를 연결해 전체 도구, query, token refresh, READ_ONLY, dry-run 계약을 검증합니다.",
+        "interfaces": [
+          "npm run verify:offline",
+          "38 MCP tools",
+          "6 trading mutation guards"
+        ],
+        "dependencies": [
+          "@modelcontextprotocol/sdk",
+          "dist/index.js",
+          "spec/openapi.json",
+          "node:http"
+        ]
+      },
+      {
+        "name": "scripts/spcx-market-sell.mjs",
+        "responsibility": "ignored JSON plan을 읽고 통화별 시장·한도를 검증하며 원자 lock과 durable journal 아래 mutation 직전 재검증 후 선택적으로 실행합니다.",
+        "interfaces": [
+          "--plan-file",
+          "--plan-id",
+          "--execute",
+          "audit/spcx-market-sell/*.journal.json"
+        ],
+        "dependencies": [
+          "dist/client.js",
+          "dist/config.js",
+          "dist/spec.js"
+        ]
+      },
+      {
+        "name": "test/spcx-market-sell.test.ts",
+        "responsibility": "실제 네트워크나 주문 없이 KRW/USD 분기, 직전 재검증, 원자 lock, journal 재실행 차단, outcome_unknown 보존을 검증합니다.",
+        "interfaces": [
+          "npm test"
+        ],
+        "dependencies": [
+          "node:test",
+          "scripts/spcx-market-sell.mjs"
+        ]
+      },
+      {
+        "name": "test/safety.test.ts",
+        "responsibility": "config, policy, audit, redaction, retry의 안전 계약을 node:test로 검증합니다.",
+        "interfaces": [
+          "npm test"
+        ],
+        "dependencies": [
+          "tsx",
+          "node:test",
+          "src"
+        ]
+      },
+      {
+        "name": "test/openapi-coverage.test.ts",
+        "responsibility": "OpenAPI 1.2.2의 operation 등록과 non-GET mutation fail-closed 계약을 검증합니다.",
+        "interfaces": [
+          "npm test"
+        ],
+        "dependencies": [
+          "@modelcontextprotocol/sdk",
+          "spec/openapi.json",
+          "src/spec.ts"
+        ]
+      },
+      {
+        "name": "test/http-security.test.ts",
+        "responsibility": "32자 이상 HTTP bearer, loopback 기본 및 external bind opt-in, exact-origin CORS, 요청 본문 한도를 검증합니다.",
+        "interfaces": [
+          "npm test"
+        ],
+        "dependencies": [
+          "node:http",
+          "src/index.ts",
+          "src/server.ts"
+        ]
+      },
+      {
+        "name": "package.json scripts and files",
+        "responsibility": "개발 및 배포 tarball에서 check, test, verify 명령에 필요한 파일을 함께 제공합니다.",
+        "interfaces": [
+          "npm run check",
+          "npm test",
+          "npm run verify:offline",
+          "npm pack --dry-run"
+        ],
+        "dependencies": [
+          "typescript",
+          "tsx"
+        ]
+      }
+    ],
+    "dataFlow": [
+      "verify:offline은 mock HTTP server를 127.0.0.1 임의 포트에 생성합니다.",
+      "StdioClientTransport는 빌드된 dist/index.js를 격리된 임시 cwd에서 실행합니다.",
+      "서버는 첫 dummy token을 받고 getStocks의 invalid-token 응답 후 두 번째 token으로 재시도합니다.",
+      "dry-run은 stock, price, limit, warnings, commission, buying power, calendar, open orders를 조회합니다.",
+      "mutation 도구는 READ_ONLY guard에서 차단되어 mock mutation route에 도달하지 않습니다."
+    ],
+    "errorHandling": [
+      {
+        "case": "도구 목록 차이",
+        "behavior": "expected 38개 목록과 deep equality가 실패해 누락 또는 의도하지 않은 노출을 보여줍니다."
+      },
+      {
+        "case": "필수 query 누락",
+        "behavior": "MCP input validation이 API 요청 전에 isError를 반환합니다."
+      },
+      {
+        "case": "거래 mutation endpoint 호출",
+        "behavior": "mock이 500 offline-live-mutation-called를 반환하고 마지막 request assertion도 실패합니다."
+      },
+      {
+        "case": "repo env 로드 위험",
+        "behavior": "stdio child cwd를 임시 디렉터리로 격리하고 TOSSINVEST_* 상속을 allowlist 방식으로 차단합니다."
+      }
+    ],
+    "contracts": [
+      {
+        "name": "Offline env contract",
+        "rules": [
+          "실제 TOSSINVEST_* 값을 상속하지 않습니다.",
+          "dummy client id와 secret만 mock token route에 사용합니다.",
+          "READ_ONLY와 audit disabled를 고정합니다."
+        ]
+      },
+      {
+        "name": "OpenAPI exposure contract",
+        "rules": [
+          "auth 포함 operation은 30개입니다.",
+          "callable operation은 29개입니다.",
+          "전체 MCP tool은 38개입니다."
+        ]
+      },
+      {
+        "name": "Trading contract",
+        "rules": [
+          "dry-run은 실제 mutation을 실행하지 않습니다.",
+          "일반 주문과 조건주문 mutation 6개는 READ_ONLY에서 실패합니다.",
+          "trading mutation은 ambiguous 429/5xx를 자동 재시도하지 않습니다.",
+          "post-call audit 실패는 이미 확정된 API 성공/실패 결과를 바꾸지 않습니다.",
+          "batch execution은 full validation 이후에만 시작합니다.",
+          "batch mutation 직전에는 통화별 장, OPEN 주문, 매도 가능 수량, 현재가와 cap을 다시 확인합니다.",
+          "실행 journal이나 lock이 존재하면 자동 재실행하지 않으며 outcome_unknown은 수동 대조가 필요합니다."
+        ]
+      }
+    ],
+    "surfaces": [
+      {
+        "path": "scripts/verify-offline.mjs",
+        "role": "Offline MCP integration harness",
+        "owner": "mcp"
+      },
+      {
+        "path": "scripts/spcx-market-sell.mjs",
+        "role": "Two-phase live order batch",
+        "owner": "workflow"
+      },
+      {
+        "path": "test/spcx-market-sell.test.ts",
+        "role": "Live batch safety tests without network calls",
+        "owner": "workflow"
+      },
+      {
+        "path": "test/safety.test.ts",
+        "role": "Safety unit tests",
+        "owner": "policy"
+      },
+      {
+        "path": "test/openapi-coverage.test.ts",
+        "role": "Official OpenAPI coverage tests",
+        "owner": "mcp"
+      },
+      {
+        "path": "test/http-security.test.ts",
+        "role": "HTTP transport security tests",
+        "owner": "infra"
+      },
+      {
+        "path": "package.json",
+        "role": "Validation and package surface",
+        "owner": "infra"
+      },
+      {
+        "path": "docs/stenc/content/specs/2026-06-12-offline-safety-validation.spec.json",
+        "role": "Canonical Stenc source contract",
+        "owner": "docs"
+      }
+    ],
+    "testingStrategy": [
+      {
+        "command": "npm run check",
+        "expected": "TypeScript source compiles without emitting files."
+      },
+      {
+        "command": "npm test",
+        "expected": "All node:test cases pass for policy, retry, official OpenAPI coverage, and HTTP transport security."
+      },
+      {
+        "command": "npm run verify:offline",
+        "expected": "38 tools, every required query, structured order request bodies, 6 READ_ONLY mutation guards, semantic dry-run, and built 401 token refresh pass against the mock API."
+      },
+      {
+        "command": "npm pack --dry-run",
+        "expected": "The tarball includes dist, spec, scripts, src, test, and tsconfig required by declared npm scripts."
+      }
+    ],
+    "validation": [
+      {
+        "command": "node ~/.codex/skills/stenc/scripts/validate-stenc-doc.js docs/stenc/content/specs/2026-06-12-offline-safety-validation.spec.json",
+        "purpose": "Validate the canonical Stenc JSON contract."
+      },
+      {
+        "command": "node ~/.codex/skills/stenc/scripts/setup-project.js --project-root . --docs-dir docs/stenc --title \"Toss Invest MCP Docs\" --skip-open-docs-script",
+        "purpose": "Regenerate static pages from JSON without hand-editing rendered HTML or overwriting the hardened open-docs.sh."
+      }
+    ],
+    "agentInstructions": [
+      "Do not pass real TOSSINVEST_CLIENT_ID or TOSSINVEST_CLIENT_SECRET to tests, CLI arguments, or MCP tool inputs.",
+      "Run npm test after changing policy, config, audit, redaction, retry, or mutation classification.",
+      "Run npm run verify:offline after changing OpenAPI, MCP registration, auth refresh, workflow, or preflight behavior.",
+      "Use npm run verify only when the user intentionally requests live API reachability."
+    ],
+    "reviewChecklist": [
+      "Offline child does not inherit real TOSSINVEST_* values.",
+      "Tool list contains exactly 38 entries for OpenAPI 1.2.2.",
+      "Every required query and structured request body remains represented in the MCP schema.",
+      "Six live mutations fail before a network mutation in READ_ONLY.",
+      "Trading mutations do not retry ambiguous 429/5xx responses and audit failures do not mask accepted orders.",
+      "invalid-token refresh is verified through dist/index.js.",
+      "Stenc source validates and rendered pages are regenerated with --skip-open-docs-script."
+    ],
+    "selfReviewChecks": [
+      {
+        "name": "Credential boundary",
+        "purpose": "Confirm no real credential value is inherited, printed, committed, or accepted as a tool argument."
+      },
+      {
+        "name": "Trading boundary",
+        "purpose": "Confirm all current and newly added mutation operations are fail-closed."
+      },
+      {
+        "name": "Contract coverage",
+        "purpose": "Confirm exact tool count, required query coverage, token rotation, semantic readiness, and package contents."
+      }
+    ],
+    "implementationHandoff": {
+      "planLocation": "docs/stenc/content/specs/2026-06-12-offline-safety-validation.spec.json",
+      "requiredSkill": "stenc",
+      "notes": [
+        "This JSON document is the source contract for offline validation changes.",
+        "Keep rendered pages generated from JSON; do not hand-edit docs/stenc HTML."
+      ]
+    },
+    "supportingSections": [
+      {
+        "heading": "Manual verification remains separate",
+        "content": "The legacy npm run verify path is reserved for intentional real Toss API authentication and reachability checks.",
+        "items": [
+          "Manual verification may read local env files.",
+          "Manual verification remains READ_ONLY unless the user explicitly enables bounded LIVE_TRADING.",
+          "Offline verification is the default for CI and contribution review."
+        ],
+        "codeBlocks": []
+      }
+    ],
+    "openQuestions": []
+  }
+}

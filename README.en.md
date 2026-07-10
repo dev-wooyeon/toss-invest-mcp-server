@@ -26,7 +26,7 @@ git clone https://github.com/dev-wooyeon/toss-invest-mcp-server.git
 cd toss-invest-mcp-server
 npm install
 npm run build
-npm run verify
+npm run verify:offline
 ```
 
 If using an env file:
@@ -43,6 +43,8 @@ TOSSINVEST_CLIENT_SECRET="..."
 TOSSINVEST_ACCOUNT="1"
 TOSSINVEST_TRADING_MODE="READ_ONLY"
 ```
+
+`npm run verify:offline` is the default installation check; it uses dummy credentials and a loopback mock API only. Run `npm run verify` optionally, and only after configuring real credentials, when you intentionally want to verify Toss API authentication and read paths. `npm run verify` forces `READ_ONLY` but still calls real account and market-data endpoints.
 
 ### Codex MCP registration
 
@@ -114,6 +116,29 @@ Expected booleans:
 - `hasClientSecret`
 - `hasDefaultAccount`
 
+### Optional Streamable HTTP transport
+
+stdio is the default. Use HTTP only for local or explicitly protected self-hosted environments. `--http` refuses to start without a bearer token and binds to `127.0.0.1` by default.
+
+Set these values in `.env.local`, then run `npm run start:http`. Never put the real token in chat, Git, or MCP tool inputs.
+
+```bash
+# Use at least 32 cryptographically random characters: openssl rand -hex 32
+MCP_HTTP_HOST=127.0.0.1
+PORT=3000
+MCP_HTTP_PATH=/mcp
+MCP_HTTP_BEARER_TOKEN="<output from openssl rand -hex 32>"
+MCP_HTTP_MAX_BODY_BYTES=1048576
+```
+
+Only browser clients need an exact, comma-separated origin allowlist. Wildcard `*` is rejected.
+
+```bash
+MCP_ALLOWED_ORIGIN=https://client.example.com
+```
+
+The built-in server is plain HTTP, so non-loopback binds are blocked by default. Prefer a TLS reverse proxy that connects to the loopback server. If an isolated container network genuinely requires `0.0.0.0`, first add TLS termination, firewall/access controls, and a smaller request limit, then explicitly set `MCP_HTTP_ALLOW_INSECURE_EXTERNAL_BIND=true`. This opt-in does not add TLS and is not a recommendation for public hosting.
+
 ## Product overview
 
 This MCP server wraps Toss Invest Open API as AI-callable tools. Users keep their API credentials local and grant the AI access only to controlled tools.
@@ -153,7 +178,7 @@ Live trading is blocked by default. The intended flow is: read account and marke
 
 ### OpenAPI-based tools
 
-Tools are generated from the bundled OpenAPI operation IDs:
+Tools are generated from the 29 callable operation IDs in the bundled official OpenAPI 1.2.2 document:
 
 - `toss_invest_get_orderbook`
 - `toss_invest_get_prices`
@@ -165,16 +190,25 @@ Tools are generated from the bundled OpenAPI operation IDs:
 - `toss_invest_get_exchange_rate`
 - `toss_invest_get_kr_market_calendar`
 - `toss_invest_get_us_market_calendar`
+- `toss_invest_get_rankings`
+- `toss_invest_get_market_indicator_prices`
+- `toss_invest_get_market_indicator_candles`
+- `toss_invest_get_market_indicator_investor_trading`
 - `toss_invest_get_accounts`
 - `toss_invest_get_holdings`
 - `toss_invest_get_orders`
 - `toss_invest_get_order`
+- `toss_invest_get_conditional_orders`
+- `toss_invest_get_conditional_order`
 - `toss_invest_get_buying_power`
 - `toss_invest_get_sellable_quantity`
 - `toss_invest_get_commissions`
 - `toss_invest_create_order`
 - `toss_invest_modify_order`
 - `toss_invest_cancel_order`
+- `toss_invest_create_conditional_order`
+- `toss_invest_modify_conditional_order`
+- `toss_invest_cancel_conditional_order`
 
 The OAuth token endpoint is not exposed as a tool. The server issues and caches tokens internally.
 
@@ -188,13 +222,15 @@ Trading modes:
 
 - `READ_ONLY`: default. Read tools and preflight/dry-run tools only.
 - `DRY_RUN`: order preparation workflows are allowed, but live order endpoints remain blocked.
-- `LIVE_TRADING`: live create/modify/cancel endpoints can execute.
+- `LIVE_TRADING`: standard and conditional create/modify/cancel endpoints can execute.
 
 Even in `LIVE_TRADING`, live order mutation tools require:
 
 - `TOSSINVEST_TRADING_MODE=LIVE_TRADING`
 - `confirmTrading: true` in the tool input
 - local policy engine approval
+
+Only `GET` operations are classified as read-only. New `GET` operations are automatically exposed as MCP tools, while every other callable method fails closed as a trading mutation. Each mutation must first pass `confirmTrading: true` and `LIVE_TRADING`, and it is blocked before any API call unless an explicit local policy handler exists. Conditional-order creation and modification use dedicated handlers for symbol lists, order limits, and conditional legs; cancellation still requires the common LIVE_TRADING configuration and explicit confirmation guards.
 
 Policy environment variables:
 
@@ -244,8 +280,10 @@ Main modules:
 
 ## Reliability behavior
 
-- 429 and 5xx responses retry with bounded exponential backoff.
-- `Retry-After` is respected when present.
+- Read requests retry 429/5xx responses with bounded exponential backoff. No trading mutation, including create requests with `clientOrderId`, retries an ambiguous 429/5xx response because Toss idempotency keys expire after 10 minutes.
+- `Retry-After` is respected for retryable requests.
+- Mutation 429/5xx responses, transport failures after submission starts, and malformed 2xx responses without the required order identifier return `outcomeUnknown: true` plus `submissionPhase`; reconcile account orders before retrying. A post-call audit write failure preserves the authoritative API result and adds `auditWarning`.
+- Only `invalid-token` and `expired-token` 401 responses rotate the cached access token; other 401 errors are returned without token churn.
 - Toss error envelopes are normalized into `error` with `status`, `code`, `message`, `requestId`, and `retryAfter`.
 - OpenAPI query/path inputs enforce enum, regex pattern, and min/max constraints where available.
 - Toss Invest Open API allows one valid access token per client, so concurrent requests use a single-flight OAuth token refresh.
@@ -310,10 +348,22 @@ TOSSINVEST_REQUIRE_CLIENT_ORDER_ID=true
 TOSSINVEST_MAX_ORDER_AMOUNT_KRW=1000000
 TOSSINVEST_MAX_ORDER_AMOUNT_USD=1000
 TOSSINVEST_BLOCKED_SYMBOLS=
-TOSSINVEST_ALLOWED_SYMBOLS=
+TOSSINVEST_ALLOWED_SYMBOLS=005930,AAPL
 ```
 
-For each live order call, pass `confirmTrading: true`. For high-value KRW orders, Toss Invest also requires `confirmHighValueOrder: true` in the order body.
+Put only intentionally permitted symbols in the allowlist. A mutation is rejected before any API call when the allowlist is empty or the matching currency limit is missing. For each live order call, pass `confirmTrading: true`. For high-value KRW orders, Toss Invest also requires `confirmHighValueOrder: true` in the order body.
+
+### Batch market sells
+
+`scripts/spcx-market-sell.mjs` reads an ignored JSON plan and defaults to a read-only dry run. It uses `PriceResponse.currency` to select the KR market calendar and KRW cap for `KRW`, or the US market calendar and USD cap for `USD`.
+
+```bash
+npm run build
+node scripts/spcx-market-sell.mjs --plan-file audit/spcx-market-sell.plan.json
+node scripts/spcx-market-sell.mjs --plan-file audit/spcx-market-sell.plan.json --execute
+```
+
+Execution mode rechecks market hours, OPEN orders, sellable quantity, current price, and the matching currency cap immediately before each mutation. It also atomically creates global and per-plan locks plus a journal under `spcx-market-sell/` in the configured audit directory. A journal for a completed, active, partially failed, or uncertain plan blocks automatic reuse of that plan. In particular, `outcome: "outcome_unknown"` means the request was sent without a conclusive response; reconcile the journal against account orders before deleting locks or journals or submitting a new plan.
 
 ## Official API source
 

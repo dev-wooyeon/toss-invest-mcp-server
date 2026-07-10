@@ -25,7 +25,7 @@ git clone https://github.com/dev-wooyeon/toss-invest-mcp-server.git
 cd toss-invest-mcp-server
 npm install
 npm run build
-npm run verify
+npm run verify:offline
 ```
 
 환경변수 파일을 사용할 경우:
@@ -42,6 +42,8 @@ TOSSINVEST_CLIENT_SECRET="..."
 TOSSINVEST_ACCOUNT="1"
 TOSSINVEST_TRADING_MODE="READ_ONLY"
 ```
+
+`npm run verify:offline`은 dummy credential과 loopback mock API만 사용하는 기본 설치 검증입니다. 실제 자격증명을 설정한 뒤 토스증권 API 인증과 조회 경로까지 의도적으로 확인하려는 경우에만 `npm run verify`를 선택적으로 실행하세요. `npm run verify`도 거래 모드는 `READ_ONLY`로 고정하지만 실제 계좌·시장 조회 API를 호출합니다.
 
 ### Codex MCP 등록
 
@@ -113,6 +115,29 @@ toss_invest_auth_status
 - `hasClientSecret`
 - `hasDefaultAccount`
 
+### 선택적 Streamable HTTP 실행
+
+stdio가 기본이며, HTTP는 로컬 또는 직접 보호하는 self-hosted 환경에서만 선택적으로 사용하세요. `--http` 모드는 bearer token이 없으면 시작하지 않고 기본적으로 `127.0.0.1`에만 바인딩됩니다.
+
+`.env.local`에 다음 값을 설정한 뒤 `npm run start:http`로 실행합니다. 실제 token 값은 채팅, Git, MCP 도구 입력에 넣지 마세요.
+
+```bash
+# 32자 이상의 암호학적 난수 사용: openssl rand -hex 32
+MCP_HTTP_HOST=127.0.0.1
+PORT=3000
+MCP_HTTP_PATH=/mcp
+MCP_HTTP_BEARER_TOKEN="<openssl rand -hex 32 출력값>"
+MCP_HTTP_MAX_BODY_BYTES=1048576
+```
+
+브라우저 클라이언트가 필요한 경우에만 정확한 origin을 쉼표로 구분해 추가합니다. wildcard `*`는 허용되지 않습니다.
+
+```bash
+MCP_ALLOWED_ORIGIN=https://client.example.com
+```
+
+내장 서버는 plain HTTP이므로 non-loopback bind를 기본 차단합니다. 가능하면 TLS reverse proxy가 loopback 서버에 연결하게 하세요. 격리된 container network 등에서 `0.0.0.0`이 꼭 필요하면 TLS 종료, 방화벽/접근 제어, 더 작은 요청 본문 한도를 먼저 적용하고 `MCP_HTTP_ALLOW_INSECURE_EXTERNAL_BIND=true`를 명시해야 합니다. 이 opt-in은 TLS를 제공하지 않으며 외부 공개를 권장한다는 의미도 아닙니다.
+
 ## 사람을 위한 소개
 
 이 MCP 서버는 토스증권 Open API를 “AI가 안전하게 호출할 수 있는 도구 모음”으로 감싸는 프로젝트입니다. 사용자는 자신의 Open API 키를 로컬에만 저장하고, AI에게는 도구 호출 권한만 제공합니다.
@@ -135,7 +160,7 @@ toss_invest_auth_status
 
 ## 제공 기능
 
-이 서버는 번들된 `spec/openapi.json`의 `operationId`를 기준으로 MCP 도구를 제공합니다. 토스증권 Open API의 기능과 실제 호출 가능한 MCP 도구가 어떻게 연결되는지는 아래 표에서 확인할 수 있습니다.
+이 서버는 번들된 공식 OpenAPI 1.2.2의 `operationId`를 기준으로 29개 callable operation을 MCP 도구로 제공합니다. 토스증권 Open API의 기능과 실제 호출 가능한 MCP 도구가 어떻게 연결되는지는 아래 표에서 확인할 수 있습니다.
 
 ### OpenAPI 기반 도구 매핑
 
@@ -152,16 +177,25 @@ toss_invest_auth_status
 | 환율 조회 | `getExchangeRate` | `toss_invest_get_exchange_rate` | 조회 |
 | 국내 장 운영 정보 조회 | `getKrMarketCalendar` | `toss_invest_get_kr_market_calendar` | 조회 |
 | 해외 장 운영 정보 조회 | `getUsMarketCalendar` | `toss_invest_get_us_market_calendar` | 조회 |
+| 종목 랭킹 조회 | `getRankings` | `toss_invest_get_rankings` | 조회 |
+| 시장지표 현재가 조회 | `getMarketIndicatorPrices` | `toss_invest_get_market_indicator_prices` | 조회 |
+| 시장지표 캔들 조회 | `getMarketIndicatorCandles` | `toss_invest_get_market_indicator_candles` | 조회 |
+| 시장지표 투자자별 매매대금 조회 | `getMarketIndicatorInvestorTrading` | `toss_invest_get_market_indicator_investor_trading` | 조회 |
 | 계좌 목록 조회 | `getAccounts` | `toss_invest_get_accounts` | 조회 |
 | 보유 주식 조회 | `getHoldings` | `toss_invest_get_holdings` | 조회 |
 | 주문 목록 조회 | `getOrders` | `toss_invest_get_orders` | 조회 |
 | 주문 상세 조회 | `getOrder` | `toss_invest_get_order` | 조회 |
+| 조건주문 목록 조회 | `getConditionalOrders` | `toss_invest_get_conditional_orders` | 조회 |
+| 조건주문 상세 조회 | `getConditionalOrder` | `toss_invest_get_conditional_order` | 조회 |
 | 매수 가능 금액 조회 | `getBuyingPower` | `toss_invest_get_buying_power` | 조회 |
 | 판매 가능 수량 조회 | `getSellableQuantity` | `toss_invest_get_sellable_quantity` | 조회 |
 | 매매 수수료 조회 | `getCommissions` | `toss_invest_get_commissions` | 조회 |
 | 주문 생성 | `createOrder` | `toss_invest_create_order` | 실제 주문, 기본 차단 |
 | 주문 정정 | `modifyOrder` | `toss_invest_modify_order` | 실제 주문, 기본 차단 |
 | 주문 취소 | `cancelOrder` | `toss_invest_cancel_order` | 실제 주문, 기본 차단 |
+| 조건주문 생성 | `createConditionalOrder` | `toss_invest_create_conditional_order` | 실제 주문, 기본 차단 |
+| 조건주문 정정 | `modifyConditionalOrder` | `toss_invest_modify_conditional_order` | 실제 주문, 기본 차단 |
+| 조건주문 취소 | `cancelConditionalOrder` | `toss_invest_cancel_conditional_order` | 실제 주문, 기본 차단 |
 
 ### 상위 워크플로우 도구
 
@@ -194,13 +228,15 @@ MCP 클라이언트 안에서도 지원 범위와 입력 스키마를 확인할 
 
 - `READ_ONLY`: 기본값. 조회, 사전 점검, dry-run 도구만 사용합니다.
 - `DRY_RUN`: 주문 준비 워크플로우는 허용하지만 실제 주문 엔드포인트는 차단합니다.
-- `LIVE_TRADING`: 실제 주문 생성, 정정, 취소 엔드포인트 호출을 허용합니다.
+- `LIVE_TRADING`: 일반 주문과 조건주문의 생성, 정정, 취소 엔드포인트 호출을 허용합니다.
 
-`LIVE_TRADING`에서도 다음 조건을 만족해야 주문 생성, 정정, 취소 도구가 실행됩니다.
+`LIVE_TRADING`에서도 다음 조건을 만족해야 일반 주문과 조건주문의 mutation 도구가 실행됩니다.
 
 - 서버 환경변수 `TOSSINVEST_TRADING_MODE=LIVE_TRADING`
 - 도구 입력값 `confirmTrading: true`
 - 로컬 정책 엔진 통과
+
+OpenAPI operation 이름이 바뀌거나 새 API가 추가되어도 조회로 오인하지 않도록 `GET`만 read-only로 취급합니다. 새 `GET` operation은 OpenAPI에서 자동으로 MCP 도구가 되지만, 그 외 method는 모두 fail-closed 거래 mutation으로 분류됩니다. 모든 mutation은 `confirmTrading: true`와 `LIVE_TRADING` 설정을 먼저 검사하고, 명시적인 local policy handler가 없으면 API 호출 전에 차단됩니다. 조건주문 생성과 정정에는 allowlist, blocklist, 주문 한도, 주문 본문의 조건 leg를 검사하는 전용 handler가 적용되며, 조건주문 취소도 공통 LIVE_TRADING 설정과 명시적 확인 guard를 통과해야 합니다.
 
 정책 환경변수:
 
@@ -273,10 +309,24 @@ TOSSINVEST_REQUIRE_CLIENT_ORDER_ID=true
 TOSSINVEST_MAX_ORDER_AMOUNT_KRW=1000000
 TOSSINVEST_MAX_ORDER_AMOUNT_USD=1000
 TOSSINVEST_BLOCKED_SYMBOLS=
-TOSSINVEST_ALLOWED_SYMBOLS=
+TOSSINVEST_ALLOWED_SYMBOLS=005930,AAPL
 ```
 
-각 실제 주문 호출에는 `confirmTrading: true`를 전달해야 합니다. KRW 기준 고액 주문은 토스증권 API 요구사항에 따라 주문 본문에 `confirmHighValueOrder: true`도 포함해야 합니다.
+allowlist에는 실제로 허용할 종목만 넣으세요. 주문 종목 통화에 대응하는 한도가 없거나 allowlist가 비어 있으면 mutation은 API 호출 전에 거부됩니다. 각 실제 주문 호출에는 `confirmTrading: true`를 전달해야 합니다. KRW 기준 고액 주문은 토스증권 API 요구사항에 따라 주문 본문에 `confirmHighValueOrder: true`도 포함해야 합니다.
+
+Mutation의 429/5xx, 전송 중 transport 오류, 필수 주문 ID가 없는 비정상 2xx는 단순 실패가 아니라 `outcomeUnknown: true`로 반환되고 감사 로그에도 `submissionPhase`와 함께 기록됩니다. 이 경우 계좌 주문 내역과 대조하기 전에는 같은 주문을 재시도하지 마세요. API 결과가 확정된 뒤 audit write만 실패한 경우에는 주문 결과를 바꾸지 않고 `auditWarning`을 함께 반환합니다.
+
+### 배치 시장가 매도
+
+`scripts/spcx-market-sell.mjs`는 ignored JSON plan을 읽어 조회와 검증만 수행하는 dry-run을 기본으로 제공합니다. `PriceResponse.currency`가 `KRW`이면 국내 장과 KRW 한도를, `USD`이면 미국 장과 USD 한도를 사용합니다.
+
+```bash
+npm run build
+node scripts/spcx-market-sell.mjs --plan-file audit/spcx-market-sell.plan.json
+node scripts/spcx-market-sell.mjs --plan-file audit/spcx-market-sell.plan.json --execute
+```
+
+실행 모드에서는 주문 직전에 장 운영 시간, OPEN 주문, 매도 가능 수량, 현재가와 통화별 한도를 다시 확인합니다. 또한 기본 audit 디렉터리 아래 `spcx-market-sell/`에 전역·plan lock과 journal을 원자적으로 생성합니다. 완료, 진행 중, 부분 실패, 결과 불확실 journal이 남아 있으면 같은 plan의 자동 재실행을 차단합니다. 특히 `outcome: "outcome_unknown"`은 주문 전송 후 응답을 확정하지 못한 상태이므로 journal과 계좌 주문 내역을 대조하기 전에는 lock이나 journal을 삭제하거나 새 plan으로 재주문하지 마세요.
 
 ## 공식 API 기준
 
