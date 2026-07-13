@@ -128,6 +128,10 @@ PORT=3000
 MCP_HTTP_PATH=/mcp
 MCP_HTTP_BEARER_TOKEN="<openssl rand -hex 32 출력값>"
 MCP_HTTP_MAX_BODY_BYTES=1048576
+MCP_HTTP_HEADERS_TIMEOUT_MS=10000
+MCP_HTTP_REQUEST_TIMEOUT_MS=30000
+MCP_HTTP_KEEP_ALIVE_TIMEOUT_MS=5000
+MCP_HTTP_MAX_CONCURRENT_REQUESTS=32
 ```
 
 브라우저 클라이언트가 필요한 경우에만 정확한 origin을 쉼표로 구분해 추가합니다. wildcard `*`는 허용되지 않습니다.
@@ -137,6 +141,8 @@ MCP_ALLOWED_ORIGIN=https://client.example.com
 ```
 
 내장 서버는 plain HTTP이므로 non-loopback bind를 기본 차단합니다. 가능하면 TLS reverse proxy가 loopback 서버에 연결하게 하세요. 격리된 container network 등에서 `0.0.0.0`이 꼭 필요하면 TLS 종료, 방화벽/접근 제어, 더 작은 요청 본문 한도를 먼저 적용하고 `MCP_HTTP_ALLOW_INSECURE_EXTERNAL_BIND=true`를 명시해야 합니다. 이 opt-in은 TLS를 제공하지 않으며 외부 공개를 권장한다는 의미도 아닙니다.
+
+토스 API 호출은 요청당 기본 15초에 중단됩니다. `TOSSINVEST_REQUEST_TIMEOUT_MS`는 1,000~120,000ms 범위에서만 설정할 수 있습니다. 내장 HTTP 서버는 헤더 10초·요청 30초·활성 요청 32개를 기본 상한으로 둡니다. `TOSSINVEST_BASE_URL`은 `https://openapi.tossinvest.com`만 허용하며, offline 검증을 위한 loopback HTTP(S) 주소만 예외입니다. 이 제한은 OAuth ClientId와 Secret이 임의 호스트로 전송되는 것을 막습니다.
 
 ## 사람을 위한 소개
 
@@ -247,6 +253,8 @@ OpenAPI operation 이름이 바뀌거나 새 API가 추가되어도 조회로 �
 - `TOSSINVEST_REQUIRE_CLIENT_ORDER_ID`
 - `TOSSINVEST_ALLOW_MARKET_ORDER_WITHOUT_PRICE`
 
+주문 한도·가격·수량은 IEEE-754 `Number`가 아닌 decimal 정밀도로 비교합니다. 따라서 환경변수 한도와 주문 금액은 지수 표기법 없이 양의 decimal 문자열로 설정하세요.
+
 감사 로그는 로컬 JSONL 파일로 남으며 기본 경로는 `audit/toss-invest-mcp-audit.jsonl`입니다. 감사 로그에는 ClientId, Secret, access token, 원본 계좌 값이 기록되지 않습니다.
 
 ## 호출 예시
@@ -315,6 +323,8 @@ TOSSINVEST_ALLOWED_SYMBOLS=005930,AAPL
 allowlist에는 실제로 허용할 종목만 넣으세요. 주문 종목 통화에 대응하는 한도가 없거나 allowlist가 비어 있으면 mutation은 API 호출 전에 거부됩니다. 각 실제 주문 호출에는 `confirmTrading: true`를 전달해야 합니다. KRW 기준 고액 주문은 토스증권 API 요구사항에 따라 주문 본문에 `confirmHighValueOrder: true`도 포함해야 합니다.
 
 Mutation의 429/5xx, 전송 중 transport 오류, 필수 주문 ID가 없는 비정상 2xx는 단순 실패가 아니라 `outcomeUnknown: true`로 반환되고 감사 로그에도 `submissionPhase`와 함께 기록됩니다. 이 경우 계좌 주문 내역과 대조하기 전에는 같은 주문을 재시도하지 마세요. API 결과가 확정된 뒤 audit write만 실패한 경우에는 주문 결과를 바꾸지 않고 `auditWarning`을 함께 반환합니다.
+
+OAuth 토큰 요청이 `403 access_denied`로 실패하면, 실행 서버의 egress IP가 토스증권 WTS의 Open API 허용 IP에 등록되지 않은 상태입니다. WTS 설정에서 해당 IP를 등록한 뒤 다시 시도하세요.
 
 ### 배치 시장가 매도
 

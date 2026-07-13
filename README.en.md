@@ -129,6 +129,10 @@ PORT=3000
 MCP_HTTP_PATH=/mcp
 MCP_HTTP_BEARER_TOKEN="<output from openssl rand -hex 32>"
 MCP_HTTP_MAX_BODY_BYTES=1048576
+MCP_HTTP_HEADERS_TIMEOUT_MS=10000
+MCP_HTTP_REQUEST_TIMEOUT_MS=30000
+MCP_HTTP_KEEP_ALIVE_TIMEOUT_MS=5000
+MCP_HTTP_MAX_CONCURRENT_REQUESTS=32
 ```
 
 Only browser clients need an exact, comma-separated origin allowlist. Wildcard `*` is rejected.
@@ -138,6 +142,8 @@ MCP_ALLOWED_ORIGIN=https://client.example.com
 ```
 
 The built-in server is plain HTTP, so non-loopback binds are blocked by default. Prefer a TLS reverse proxy that connects to the loopback server. If an isolated container network genuinely requires `0.0.0.0`, first add TLS termination, firewall/access controls, and a smaller request limit, then explicitly set `MCP_HTTP_ALLOW_INSECURE_EXTERNAL_BIND=true`. This opt-in does not add TLS and is not a recommendation for public hosting.
+
+Each Toss API attempt has a 15-second deadline by default. `TOSSINVEST_REQUEST_TIMEOUT_MS` accepts only 1,000-120,000 ms. The built-in HTTP server defaults to a 10-second header limit, 30-second request limit, and 32 active requests. `TOSSINVEST_BASE_URL` accepts only `https://openapi.tossinvest.com`, with HTTP(S) loopback URLs allowed solely for offline/local tests; this prevents OAuth ClientId and Secret from being sent to an arbitrary host.
 
 ## Product overview
 
@@ -241,6 +247,8 @@ Policy environment variables:
 - `TOSSINVEST_REQUIRE_CLIENT_ORDER_ID`
 - `TOSSINVEST_ALLOW_MARKET_ORDER_WITHOUT_PRICE`
 
+Order caps, prices, and quantities are compared as exact decimals rather than IEEE-754 `Number` values. Set limits and order amounts as positive non-exponential decimal strings.
+
 Audit logging is local JSONL at `audit/toss-invest-mcp-audit.jsonl` by default. It does not log ClientId, Secret, access tokens, or raw account values.
 
 ## Technical architecture
@@ -287,6 +295,7 @@ Main modules:
 - Toss error envelopes are normalized into `error` with `status`, `code`, `message`, `requestId`, and `retryAfter`.
 - OpenAPI query/path inputs enforce enum, regex pattern, and min/max constraints where available.
 - Toss Invest Open API allows one valid access token per client, so concurrent requests use a single-flight OAuth token refresh.
+- OAuth `403 access_denied` means the server egress IP is not registered in Toss Securities WTS Open API allowed-IP management; register the IP before retrying.
 
 ## Example calls
 
