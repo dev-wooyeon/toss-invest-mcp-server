@@ -97,14 +97,15 @@ export type RetryConfig = {
   maxRetries: number;
   baseDelayMs: number;
   maxDelayMs: number;
+  requestTimeoutMs: number;
 };
 
 export type TradingPolicyConfig = {
   mode: TradingMode;
   allowedSymbols?: string[];
   blockedSymbols: string[];
-  maxOrderAmountKrw?: number;
-  maxOrderAmountUsd?: number;
+  maxOrderAmountKrw?: string;
+  maxOrderAmountUsd?: string;
   requireClientOrderId: boolean;
   allowMarketOrderWithoutPrice: boolean;
 };

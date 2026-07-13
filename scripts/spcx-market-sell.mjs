@@ -712,13 +712,14 @@ function assertNoOpenOrder(openOrders, symbol) {
 }
 
 function assertSellable(order, sellable) {
-  const available = Number(sellable?.sellableQuantity);
-  const quantity = Number(order.quantity);
+  const available = typeof sellable?.sellableQuantity === "string"
+    ? sellable.sellableQuantity
+    : undefined;
+  const quantity = typeof order.quantity === "string" ? order.quantity : "";
   if (
-    !Number.isFinite(available) ||
-    available < 0 ||
-    !Number.isSafeInteger(quantity) ||
-    available < quantity
+    !isNonNegativeDecimal(available) ||
+    !isPositiveSafeInteger(quantity) ||
+    compareDecimals(available, quantity) < 0
   ) {
     throw new Error(
       `${order.symbol} sellable quantity ${sellable?.sellableQuantity ?? "unknown"} < ${order.quantity}`,
@@ -740,24 +741,27 @@ function assertOrderNotional(order, price, config) {
   const cap = currency === "KRW"
     ? config.tradingPolicy.maxOrderAmountKrw
     : config.tradingPolicy.maxOrderAmountUsd;
-  if (!Number.isFinite(cap) || cap <= 0) {
+  if (typeof cap !== "string" || !isPositiveDecimal(cap)) {
     throw new Error(
       `A positive TOSSINVEST_MAX_ORDER_AMOUNT_${currency} is required for ${order.symbol}.`,
     );
   }
-  const lastPrice = Number(price.lastPrice);
-  const quantity = Number(order.quantity);
-  const amount = lastPrice * quantity;
-  if (!Number.isFinite(amount) || amount <= 0) {
+  if (
+    typeof price.lastPrice !== "string" ||
+    !isPositiveDecimal(price.lastPrice) ||
+    typeof order.quantity !== "string" ||
+    !isPositiveSafeInteger(order.quantity)
+  ) {
     throw new Error(`${order.symbol} has no valid ${currency} reference price.`);
   }
-  if (amount > cap) {
+  const amount = multiplyDecimals(price.lastPrice, order.quantity);
+  if (compareDecimals(amount, cap) > 0) {
     throw new Error(
       `${order.symbol} estimated ${currency} notional ${amount} exceeds ${currency} max ${cap}.`,
     );
   }
   return {
-    amount: String(amount),
+    amount,
     currency,
     referencePrice: String(price.lastPrice),
   };
@@ -900,12 +904,63 @@ function parsePlannedOrder(value, index) {
   if (!/^[A-Z0-9.-]{1,20}$/.test(symbol)) {
     throw new Error(`orders[${index}].symbol is invalid.`);
   }
-  if (!/^\d+$/.test(quantity) || !Number.isSafeInteger(Number(quantity)) || Number(quantity) <= 0) {
+  if (!isPositiveSafeInteger(quantity)) {
     throw new Error(
       `orders[${index}].quantity must be a positive safe-integer string.`,
     );
   }
   return { symbol, quantity };
+}
+
+function isPositiveSafeInteger(value) {
+  return /^\d+$/.test(value) &&
+    BigInt(value) > 0n &&
+    BigInt(value) <= BigInt(Number.MAX_SAFE_INTEGER);
+}
+
+function isPositiveDecimal(value) {
+  return isNonNegativeDecimal(value) && decimalParts(value).coefficient > 0n;
+}
+
+function isNonNegativeDecimal(value) {
+  return typeof value === "string" && /^\d+(\.\d+)?$/.test(value);
+}
+
+function compareDecimals(left, right) {
+  const leftParts = decimalParts(left);
+  const rightParts = decimalParts(right);
+  const scale = Math.max(leftParts.scale, rightParts.scale);
+  const leftValue = leftParts.coefficient * 10n ** BigInt(scale - leftParts.scale);
+  const rightValue = rightParts.coefficient * 10n ** BigInt(scale - rightParts.scale);
+  return leftValue === rightValue ? 0 : leftValue > rightValue ? 1 : -1;
+}
+
+function multiplyDecimals(left, right) {
+  const leftParts = decimalParts(left);
+  const rightParts = decimalParts(right);
+  return formatDecimal({
+    coefficient: leftParts.coefficient * rightParts.coefficient,
+    scale: leftParts.scale + rightParts.scale,
+  });
+}
+
+function decimalParts(value) {
+  if (!isNonNegativeDecimal(value)) {
+    throw new Error("Expected a non-negative decimal string.");
+  }
+  const [whole, fraction = ""] = value.split(".");
+  return { coefficient: BigInt(`${whole}${fraction}`), scale: fraction.length };
+}
+
+function formatDecimal({ coefficient, scale }) {
+  const digits = coefficient.toString();
+  if (scale === 0) {
+    return digits;
+  }
+  const padded = digits.padStart(scale + 1, "0");
+  const whole = padded.slice(0, -scale).replace(/^0+(?=\d)/, "");
+  const fraction = padded.slice(-scale).replace(/0+$/, "");
+  return fraction ? `${whole}.${fraction}` : whole;
 }
 
 async function callOperation(client, getOperation, operationId, args) {

@@ -11,6 +11,7 @@ import {
   assertOrderModificationPolicy,
   parseOrderDraft,
 } from "./policy.js";
+import { isPositiveDecimal } from "./decimal.js";
 import type { CallArgs, OperationRecord, TossConfig } from "./types.js";
 
 type TokenState = {
@@ -232,7 +233,7 @@ export class TossInvestClient {
     const row = matches[0];
     const price = stringOrUndefined(row.lastPrice);
     const currency = stringOrUndefined(row.currency);
-    if (!price || !/^\d+(\.\d+)?$/.test(price) || Number(price) <= 0) {
+    if (!price || !isPositiveDecimal(price)) {
       throw new Error(`Trading policy price lookup returned no valid price for ${symbol}.`);
     }
     if (currency !== "KRW" && currency !== "USD") {
@@ -297,6 +298,14 @@ export class TossInvestClient {
     );
 
     if (!response.ok) {
+      const oauthError = isObject(response.body)
+        ? stringOrUndefined(response.body.error)
+        : undefined;
+      if (response.status === 403 && oauthError === "access_denied") {
+        throw new Error(
+          "Toss Invest OAuth token request was denied because this server's source IP is not allowlisted. Register the host egress IP in Toss Securities WTS > Open API > Allowed IP management.",
+        );
+      }
       throw new Error(
         `Toss Invest OAuth token request failed with HTTP ${response.status}: ${safeJson(response.body, this.config)}`,
       );
@@ -344,7 +353,14 @@ export class TossInvestClient {
 
     while (attempt <= maxRetries) {
       attempt += 1;
-      response = await this.parseFetchResponse(await fetch(url, init), attempt);
+      const timeoutSignal = AbortSignal.timeout(this.config.retry.requestTimeoutMs);
+      const signal = init.signal
+        ? AbortSignal.any([init.signal, timeoutSignal])
+        : timeoutSignal;
+      response = await this.parseFetchResponse(
+        await fetch(url, { ...init, signal }),
+        attempt,
+      );
       if (!shouldRetry(response) || attempt > maxRetries) {
         return response;
       }

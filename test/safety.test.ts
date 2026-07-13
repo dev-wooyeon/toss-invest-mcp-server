@@ -41,6 +41,29 @@ test("config defaults to READ_ONLY and auth status exposes booleans only", () =>
   assert.equal("defaultAccount" in status, false);
 });
 
+test("config only permits the official API host or loopback test servers", () => {
+  assert.equal(
+    getConfig({ TOSSINVEST_BASE_URL: "https://openapi.tossinvest.com/" }).baseUrl,
+    "https://openapi.tossinvest.com",
+  );
+  assert.equal(
+    getConfig({ TOSSINVEST_BASE_URL: "http://127.0.0.1:4567" }).baseUrl,
+    "http://127.0.0.1:4567",
+  );
+  assert.throws(
+    () => getConfig({ TOSSINVEST_BASE_URL: "https://example.test" }),
+    /must use https:\/\/openapi\.tossinvest\.com/,
+  );
+  assert.throws(
+    () => getConfig({ TOSSINVEST_BASE_URL: "http://openapi.tossinvest.com" }),
+    /must use https:\/\/openapi\.tossinvest\.com/,
+  );
+  assert.throws(
+    () => getConfig({ TOSSINVEST_BASE_URL: "https://openapi.tossinvest.com/proxy" }),
+    /must not include credentials, a path, query, or fragment/,
+  );
+});
+
 test("invalid trading mode falls back to READ_ONLY", () => {
   const config = getConfig({
     TOSSINVEST_TRADING_MODE: "unexpected",
@@ -112,6 +135,30 @@ test("policy applies allowlist, blocklist, amount, and clientOrderId guards", ()
   assert.match(decision.errors.join(" "), /not in TOSSINVEST_ALLOWED_SYMBOLS/);
   assert.match(decision.errors.join(" "), /clientOrderId is required/);
   assert.match(decision.errors.join(" "), /exceeds TOSSINVEST_MAX_ORDER_AMOUNT_KRW/);
+});
+
+test("policy preserves decimal precision at live-order amount boundaries", () => {
+  const config = getConfig({
+    TOSSINVEST_TRADING_MODE: "LIVE_TRADING",
+    TOSSINVEST_ALLOWED_SYMBOLS: "AAPL",
+    TOSSINVEST_MAX_ORDER_AMOUNT_USD: "100",
+  });
+  const order = parseOrderDraft({
+    clientOrderId: "decimal-cap",
+    symbol: "AAPL",
+    side: "BUY",
+    orderType: "MARKET",
+    orderAmount: "100.0000000000000001",
+  });
+
+  const decision = evaluateOrderPolicy(config, order, {
+    liveExecution: true,
+    referenceCurrency: "USD",
+  });
+
+  assert.equal(decision.allowed, false);
+  assert.equal(decision.estimatedNotional?.amount, "100.0000000000000001");
+  assert.match(decision.errors.join(" "), /exceeds TOSSINVEST_MAX_ORDER_AMOUNT_USD=100/);
 });
 
 test("policy warns on dry-run clientOrderId and market notional gaps", () => {
@@ -525,9 +572,58 @@ test("redact removes configured secrets, default account, and bearer tokens", ()
   assert.equal(redacted, "[REDACTED] [REDACTED] [REDACTED] Bearer [REDACTED]");
 });
 
+test("OAuth IP denial gives the WTS allowlist recovery action", async () => {
+  const config = getConfig({
+    TOSSINVEST_CLIENT_ID: "client-id",
+    TOSSINVEST_CLIENT_SECRET: "client-secret",
+    TOSSINVEST_MAX_RETRIES: "0",
+  });
+  const client = new TossInvestClient(config);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    jsonResponse(403, {
+      error: "access_denied",
+      error_description: "IP address not allowed",
+    })) as typeof fetch;
+
+  try {
+    await assert.rejects(
+      client.callOperation(testOperation("getTest", "get"), {}),
+      /source IP is not allowlisted.*WTS.*Allowed IP management/,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("client attaches the configured timeout to every upstream attempt", async () => {
+  const config = getConfig({
+    TOSSINVEST_CLIENT_ID: "client-id",
+    TOSSINVEST_CLIENT_SECRET: "client-secret",
+    TOSSINVEST_MAX_RETRIES: "0",
+    TOSSINVEST_REQUEST_TIMEOUT_MS: "1000",
+  });
+  const client = new TossInvestClient(config);
+  const signals: AbortSignal[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (_input, init) => {
+    assert.ok(init?.signal instanceof AbortSignal);
+    signals.push(init.signal);
+    return jsonResponse(200, { access_token: "token", expires_in: 3600 });
+  }) as typeof fetch;
+
+  try {
+    await client.callOperation(testOperation("getTest", "get"), {});
+    assert.equal(signals.length, 2);
+    assert.equal(signals.every((signal) => !signal.aborted), true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("client refreshes access token once after API 401", async () => {
   const config = getConfig({
-    TOSSINVEST_BASE_URL: "https://example.test",
+    TOSSINVEST_BASE_URL: "https://openapi.tossinvest.com",
     TOSSINVEST_CLIENT_ID: "client-id",
     TOSSINVEST_CLIENT_SECRET: "client-secret",
     TOSSINVEST_MAX_RETRIES: "0",
@@ -598,7 +694,7 @@ test("client refreshes access token once after API 401", async () => {
 
 test("client does not rotate tokens for non-token 401 errors", async () => {
   const config = getConfig({
-    TOSSINVEST_BASE_URL: "https://example.test",
+    TOSSINVEST_BASE_URL: "https://openapi.tossinvest.com",
     TOSSINVEST_CLIENT_ID: "client-id",
     TOSSINVEST_CLIENT_SECRET: "client-secret",
     TOSSINVEST_MAX_RETRIES: "0",
@@ -638,7 +734,7 @@ test("client does not rotate tokens for non-token 401 errors", async () => {
 
 test("non-idempotent trading mutations do not retry ambiguous 5xx responses", async () => {
   const config = getConfig({
-    TOSSINVEST_BASE_URL: "https://example.test",
+    TOSSINVEST_BASE_URL: "https://openapi.tossinvest.com",
     TOSSINVEST_CLIENT_ID: "client-id",
     TOSSINVEST_CLIENT_SECRET: "client-secret",
     TOSSINVEST_ACCOUNT: "1",
@@ -683,7 +779,7 @@ test("non-idempotent trading mutations do not retry ambiguous 5xx responses", as
 
 test("create mutations do not retry ambiguous 5xx responses past the idempotency boundary", async () => {
   const config = getConfig({
-    TOSSINVEST_BASE_URL: "https://example.test",
+    TOSSINVEST_BASE_URL: "https://openapi.tossinvest.com",
     TOSSINVEST_CLIENT_ID: "client-id",
     TOSSINVEST_CLIENT_SECRET: "client-secret",
     TOSSINVEST_ACCOUNT: "1",
@@ -744,7 +840,7 @@ test("create mutations do not retry ambiguous 5xx responses past the idempotency
 
 test("quantity MARKET order enforces the configured cap using a current quote", async () => {
   const config = getConfig({
-    TOSSINVEST_BASE_URL: "https://example.test",
+    TOSSINVEST_BASE_URL: "https://openapi.tossinvest.com",
     TOSSINVEST_CLIENT_ID: "client-id",
     TOSSINVEST_CLIENT_SECRET: "client-secret",
     TOSSINVEST_ACCOUNT: "1",
@@ -799,7 +895,7 @@ test("quantity MARKET order enforces the configured cap using a current quote", 
 
 test("mutation transport failures return a typed outcome_unknown result", async () => {
   const config = getConfig({
-    TOSSINVEST_BASE_URL: "https://example.test",
+    TOSSINVEST_BASE_URL: "https://openapi.tossinvest.com",
     TOSSINVEST_CLIENT_ID: "client-id",
     TOSSINVEST_CLIENT_SECRET: "client-secret",
     TOSSINVEST_ACCOUNT: "1",
@@ -869,7 +965,7 @@ test("mutation transport failures return a typed outcome_unknown result", async 
 
 test("malformed HTTP success for a mutation is treated as outcome_unknown", async () => {
   const config = getConfig({
-    TOSSINVEST_BASE_URL: "https://example.test",
+    TOSSINVEST_BASE_URL: "https://openapi.tossinvest.com",
     TOSSINVEST_CLIENT_ID: "client-id",
     TOSSINVEST_CLIENT_SECRET: "client-secret",
     TOSSINVEST_ACCOUNT: "1",
@@ -925,7 +1021,7 @@ test("malformed HTTP success for a mutation is treated as outcome_unknown", asyn
 
 test("conditional-order cancellation accepts the official 204 No Content response", async () => {
   const config = getConfig({
-    TOSSINVEST_BASE_URL: "https://example.test",
+    TOSSINVEST_BASE_URL: "https://openapi.tossinvest.com",
     TOSSINVEST_CLIENT_ID: "client-id",
     TOSSINVEST_CLIENT_SECRET: "client-secret",
     TOSSINVEST_ACCOUNT: "1",
@@ -997,7 +1093,7 @@ test("unknown future mutations are blocked before network access", async () => {
 
 test("order modification resolves the original symbol before applying live policy", async () => {
   const config = getConfig({
-    TOSSINVEST_BASE_URL: "https://example.test",
+    TOSSINVEST_BASE_URL: "https://openapi.tossinvest.com",
     TOSSINVEST_CLIENT_ID: "client-id",
     TOSSINVEST_CLIENT_SECRET: "client-secret",
     TOSSINVEST_ACCOUNT: "1",
@@ -1093,7 +1189,7 @@ test("every required OpenAPI query parameter is serialized onto the wire URL", (
 
 test("preflight is not ready when cash, market, warnings, and open orders block it", async () => {
   const config = getConfig({
-    TOSSINVEST_BASE_URL: "https://example.test",
+    TOSSINVEST_BASE_URL: "https://openapi.tossinvest.com",
     TOSSINVEST_CLIENT_ID: "client-id",
     TOSSINVEST_CLIENT_SECRET: "client-secret",
     TOSSINVEST_ACCOUNT: "1",
@@ -1177,7 +1273,7 @@ test("preflight is not ready when cash, market, warnings, and open orders block 
 
 test("preflight fails closed for empty, malformed, or wrong-currency 200 payloads", async () => {
   const config = getConfig({
-    TOSSINVEST_BASE_URL: "https://example.test",
+    TOSSINVEST_BASE_URL: "https://openapi.tossinvest.com",
     TOSSINVEST_CLIENT_ID: "client-id",
     TOSSINVEST_CLIENT_SECRET: "client-secret",
     TOSSINVEST_ACCOUNT: "1",

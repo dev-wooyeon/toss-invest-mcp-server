@@ -499,8 +499,8 @@ function config(cwd, allowedSymbols, overrides = {}) {
       blockedSymbols: [],
       allowMarketOrderWithoutPrice: true,
       requireClientOrderId: true,
-      maxOrderAmountKrw: overrides.maxOrderAmountKrw ?? 1_000_000,
-      maxOrderAmountUsd: overrides.maxOrderAmountUsd ?? 1_000,
+      maxOrderAmountKrw: String(overrides.maxOrderAmountKrw ?? 1_000_000),
+      maxOrderAmountUsd: String(overrides.maxOrderAmountUsd ?? 1_000),
     },
     audit: {
       enabled: true,

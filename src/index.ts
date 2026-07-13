@@ -21,6 +21,10 @@ const DEFAULT_HTTP_HOST = "127.0.0.1";
 const DEFAULT_HTTP_PORT = 3000;
 const DEFAULT_HTTP_PATH = "/mcp";
 const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
+const DEFAULT_HTTP_HEADERS_TIMEOUT_MS = 10_000;
+const DEFAULT_HTTP_REQUEST_TIMEOUT_MS = 30_000;
+const DEFAULT_HTTP_KEEP_ALIVE_TIMEOUT_MS = 5_000;
+const DEFAULT_HTTP_MAX_CONCURRENT_REQUESTS = 32;
 const MIN_BEARER_TOKEN_LENGTH = 32;
 
 export type HttpOptions = {
@@ -30,6 +34,10 @@ export type HttpOptions = {
   bearerToken: string;
   allowedOrigins: ReadonlySet<string>;
   maxBodyBytes: number;
+  headersTimeoutMs: number;
+  requestTimeoutMs: number;
+  keepAliveTimeoutMs: number;
+  maxConcurrentRequests: number;
 };
 
 async function main() {
@@ -61,9 +69,30 @@ export async function startHttp(
 ): Promise<HttpServer> {
   const options = resolveHttpOptions(env);
   const sharedDependencies = dependencies ?? createServerDependencies(env);
-  const httpServer = createHttpServer(
-    createHttpRequestHandler(options, sharedDependencies),
-  );
+  const requestHandler = createHttpRequestHandler(options, sharedDependencies);
+  let activeRequests = 0;
+  const httpServer = createHttpServer((req, res) => {
+    if (activeRequests >= options.maxConcurrentRequests) {
+      setSecurityHeaders(res);
+      res.setHeader("Retry-After", "1");
+      sendJsonRpcError(res, 503, -32004, "MCP server is busy; retry shortly");
+      return;
+    }
+
+    activeRequests += 1;
+    let released = false;
+    const release = () => {
+      if (!released) {
+        released = true;
+        activeRequests -= 1;
+      }
+    };
+    res.once("close", release);
+    void requestHandler(req, res).catch(() => undefined).finally(release);
+  });
+  httpServer.headersTimeout = options.headersTimeoutMs;
+  httpServer.requestTimeout = options.requestTimeoutMs;
+  httpServer.keepAliveTimeout = options.keepAliveTimeoutMs;
 
   await new Promise<void>((resolve, reject) => {
     const onError = (error: Error) => reject(error);
@@ -125,6 +154,26 @@ export function resolveHttpOptions(
     );
   }
 
+  const headersTimeoutMs = parseIntegerInRange(
+    env.MCP_HTTP_HEADERS_TIMEOUT_MS,
+    DEFAULT_HTTP_HEADERS_TIMEOUT_MS,
+    1_000,
+    60_000,
+    "MCP_HTTP_HEADERS_TIMEOUT_MS",
+  );
+  const requestTimeoutMs = parseIntegerInRange(
+    env.MCP_HTTP_REQUEST_TIMEOUT_MS,
+    DEFAULT_HTTP_REQUEST_TIMEOUT_MS,
+    1_000,
+    120_000,
+    "MCP_HTTP_REQUEST_TIMEOUT_MS",
+  );
+  if (headersTimeoutMs > requestTimeoutMs) {
+    throw new Error(
+      "MCP_HTTP_HEADERS_TIMEOUT_MS must not exceed MCP_HTTP_REQUEST_TIMEOUT_MS.",
+    );
+  }
+
   return {
     host,
     port: parseIntegerInRange(env.PORT, DEFAULT_HTTP_PORT, 0, 65_535, "PORT"),
@@ -137,6 +186,22 @@ export function resolveHttpOptions(
       1,
       Number.MAX_SAFE_INTEGER,
       "MCP_HTTP_MAX_BODY_BYTES",
+    ),
+    headersTimeoutMs,
+    requestTimeoutMs,
+    keepAliveTimeoutMs: parseIntegerInRange(
+      env.MCP_HTTP_KEEP_ALIVE_TIMEOUT_MS,
+      DEFAULT_HTTP_KEEP_ALIVE_TIMEOUT_MS,
+      1_000,
+      60_000,
+      "MCP_HTTP_KEEP_ALIVE_TIMEOUT_MS",
+    ),
+    maxConcurrentRequests: parseIntegerInRange(
+      env.MCP_HTTP_MAX_CONCURRENT_REQUESTS,
+      DEFAULT_HTTP_MAX_CONCURRENT_REQUESTS,
+      1,
+      256,
+      "MCP_HTTP_MAX_CONCURRENT_REQUESTS",
     ),
   };
 }

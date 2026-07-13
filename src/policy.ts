@@ -1,4 +1,10 @@
 import type { TossConfig, TradingPolicyConfig } from "./types.js";
+import {
+  compareDecimals,
+  isPositiveDecimal,
+  multiplyDecimals,
+  normalizeDecimal,
+} from "./decimal.js";
 
 export type OrderDraft = {
   clientOrderId?: string;
@@ -32,7 +38,7 @@ type PolicyEvaluationOptions = {
   requireClientOrderId?: boolean;
 };
 
-const HIGH_VALUE_ORDER_KRW = 100_000_000;
+const HIGH_VALUE_ORDER_KRW = "100000000";
 
 export function parseOrderDraft(value: unknown): OrderDraft {
   if (!isRecord(value)) {
@@ -207,7 +213,7 @@ export function evaluateOrderPolicy(
     if (
       estimatedNotional.currency === "KRW" &&
       policy.maxOrderAmountKrw !== undefined &&
-      Number(estimatedNotional.amount) > policy.maxOrderAmountKrw
+      compareDecimals(estimatedNotional.amount, policy.maxOrderAmountKrw) > 0
     ) {
       errors.push(
         `Estimated KRW notional ${estimatedNotional.amount} exceeds TOSSINVEST_MAX_ORDER_AMOUNT_KRW=${policy.maxOrderAmountKrw}.`,
@@ -216,7 +222,7 @@ export function evaluateOrderPolicy(
     if (
       estimatedNotional.currency === "USD" &&
       policy.maxOrderAmountUsd !== undefined &&
-      Number(estimatedNotional.amount) > policy.maxOrderAmountUsd
+      compareDecimals(estimatedNotional.amount, policy.maxOrderAmountUsd) > 0
     ) {
       errors.push(
         `Estimated USD notional ${estimatedNotional.amount} exceeds TOSSINVEST_MAX_ORDER_AMOUNT_USD=${policy.maxOrderAmountUsd}.`,
@@ -224,7 +230,7 @@ export function evaluateOrderPolicy(
     }
     if (
       estimatedNotional.currency === "KRW" &&
-      Number(estimatedNotional.amount) >= HIGH_VALUE_ORDER_KRW &&
+      compareDecimals(estimatedNotional.amount, HIGH_VALUE_ORDER_KRW) >= 0 &&
       order.confirmHighValueOrder !== true
     ) {
       errors.push(
@@ -426,8 +432,8 @@ export function assertConditionalOrderPolicy(
       );
     }
     if (
-      Number(first.triggerPrice) <= Number(currentPrice) ||
-      Number(currentPrice) <= Number(second.triggerPrice)
+      compareDecimals(first.triggerPrice, currentPrice) <= 0 ||
+      compareDecimals(currentPrice, second.triggerPrice) <= 0
     ) {
       throw new Error(
         "OCO trigger prices must satisfy first.triggerPrice > current price > second.triggerPrice.",
@@ -560,7 +566,7 @@ function estimateNotional(
 ) {
   if (order.orderAmount) {
     return {
-      amount: normalizeDecimal(order.orderAmount),
+      amount: normalizeDecimal(order.orderAmount) ?? order.orderAmount,
       currency: "USD" as const,
       source: "orderAmount" as const,
     };
@@ -572,7 +578,7 @@ function estimateNotional(
   }
 
   return {
-    amount: normalizeDecimal(String(Number(order.quantity) * Number(price))),
+    amount: multiplyDecimals(order.quantity, price),
     currency: referenceCurrency ?? currencyForSymbol(order.symbol),
     source: "quantityPrice" as const,
   };
@@ -585,14 +591,6 @@ function isIsoCalendarDate(value: string) {
   const parsed = new Date(`${value}T00:00:00.000Z`);
   return !Number.isNaN(parsed.getTime()) &&
     parsed.toISOString().slice(0, 10) === value;
-}
-
-function normalizeDecimal(value: string) {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) {
-    return value;
-  }
-  return Number.isInteger(parsed) ? String(parsed) : parsed.toFixed(8).replace(/0+$/, "").replace(/\.$/, "");
 }
 
 function requiredString(value: unknown, field: string) {
@@ -642,7 +640,7 @@ function optionalDecimalString(value: unknown, field: string) {
   if (!result) {
     return undefined;
   }
-  if (!/^\d+(\.\d+)?$/.test(result) || Number(result) <= 0) {
+  if (!isPositiveDecimal(result)) {
     throw new Error(`${field} must be a positive decimal string.`);
   }
   return result;

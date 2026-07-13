@@ -43,6 +43,10 @@ test("HTTP options fail closed for authentication and CORS", () => {
   assert.equal(options.host, "127.0.0.1");
   assert.equal(options.path, "/mcp");
   assert.equal(options.maxBodyBytes, 1024 * 1024);
+  assert.equal(options.headersTimeoutMs, 10_000);
+  assert.equal(options.requestTimeoutMs, 30_000);
+  assert.equal(options.keepAliveTimeoutMs, 5_000);
+  assert.equal(options.maxConcurrentRequests, 32);
   assert.deepEqual([...options.allowedOrigins], []);
 });
 
@@ -53,6 +57,10 @@ test("HTTP server enforces bearer auth, exact CORS origins, and body limits", as
     MCP_HTTP_BEARER_TOKEN: token,
     MCP_ALLOWED_ORIGIN: "https://trusted.example",
     MCP_HTTP_MAX_BODY_BYTES: "512",
+    MCP_HTTP_HEADERS_TIMEOUT_MS: "2000",
+    MCP_HTTP_REQUEST_TIMEOUT_MS: "4000",
+    MCP_HTTP_KEEP_ALIVE_TIMEOUT_MS: "1000",
+    MCP_HTTP_MAX_CONCURRENT_REQUESTS: "1",
     TOSSINVEST_AUDIT_LOG: "false",
   });
   t.after(() => closeServer(server));
@@ -60,7 +68,34 @@ test("HTTP server enforces bearer auth, exact CORS origins, and body limits", as
   const address = server.address();
   assert.ok(address && typeof address === "object");
   assert.equal(address.address, "127.0.0.1");
+  assert.equal(server.headersTimeout, 2000);
+  assert.equal(server.requestTimeout, 4000);
+  assert.equal(server.keepAliveTimeout, 1000);
   const endpoint = `http://127.0.0.1:${address.port}/mcp`;
+
+  const holdingRequest = request(endpoint, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      "Content-Length": "12",
+    },
+  });
+  holdingRequest.on("error", () => undefined);
+  holdingRequest.write('{"value":"');
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const busy = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: "{}",
+  });
+  assert.equal(busy.status, 503);
+  holdingRequest.destroy();
+  await new Promise<void>((resolve) => holdingRequest.once("close", resolve));
+  await new Promise<void>((resolve) => setImmediate(resolve));
 
   const unauthorized = await fetch(endpoint, {
     method: "POST",
