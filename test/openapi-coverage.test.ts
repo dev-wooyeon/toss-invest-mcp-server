@@ -35,9 +35,9 @@ const CONDITIONAL_ORDER_MUTATIONS = [
   "cancelConditionalOrder",
 ] as const;
 
-test("bundled OpenAPI 1.2.2 indexes every official operation", () => {
+test("bundled OpenAPI 1.2.4 indexes every official operation", () => {
   assert.equal(openapi.openapi, "3.1.0");
-  assert.equal(openapi.info.version, "1.2.2");
+  assert.equal(openapi.info.version, "1.2.4");
 
   const documentOperationIds = Object.values(openapi.paths)
     .flatMap((pathItem) => Object.values(pathItem))

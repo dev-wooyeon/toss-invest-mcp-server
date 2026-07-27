@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "토스증권 Open API",
-    "version": "1.2.2"
+    "version": "1.2.4"
   },
   "servers": [
     {
@@ -37,7 +37,7 @@
     },
     {
       "name": "Market Indicators",
-      "description": "국내 주요 지수(코스피·코스닥)와 한국 국채 금리 시세, KRX 투자자별 매매대금을 조회하는 그룹입니다. 투자자별 매매대금은\n코스피·코스닥을 대상으로 개인·외국인·기관·기타법인 분류(기관 세부 분류 포함)의 매수·매도 거래대금을\n제공합니다. 계좌와 무관한 정보로 토큰만으로 호출 가능합니다.\n\n이 그룹의 모든 엔드포인트는 아래 **심볼 카탈로그**의 8종 심볼만 지원하며, 카탈로그에 없는 심볼은 400 `unsupported-symbol` 로 응답합니다.\n개별 종목(예: `005930`, `AAPL`)의 시세는 본 그룹이 아닌 Market Data 그룹(`GET /api/v1/prices`, `/candles`)을 사용하세요.\n\n#### 심볼 카탈로그\n\n| 심볼 | 명칭 | 자산 유형 | 표시 단위 | 비고 |\n|------|------|----------|----------|------|\n| `KOSPI` | 코스피 | `INDEX` | 포인트 | 투자자별 매매대금 지원 |\n| `KOSDAQ` | 코스닥 | `INDEX` | 포인트 | 투자자별 매매대금 지원 |\n| `KR_BOND_2Y` | 한국 국채 2년 | `BOND` | % | 수익률(금리), 예: `3.25` = 3.25% |\n| `KR_BOND_3Y` | 한국 국채 3년 | `BOND` | % | |\n| `KR_BOND_5Y` | 한국 국채 5년 | `BOND` | % | |\n| `KR_BOND_10Y` | 한국 국채 10년 | `BOND` | % | |\n| `KR_BOND_20Y` | 한국 국채 20년 | `BOND` | % | |\n| `KR_BOND_30Y` | 한국 국채 30년 | `BOND` | % | |"
+      "description": "국내 주요 지수(코스피·코스닥)와 한국 국채 금리 시세, KRX 투자자별 매매대금을 조회하는 그룹입니다. 투자자별 매매대금은\n코스피·코스닥을 대상으로 개인·외국인·기관·기타법인 분류(기관 세부 분류 포함)의 매수·매도 거래대금을\n제공합니다. 계좌와 무관한 정보로 토큰만으로 호출 가능합니다.\n\n이 그룹의 모든 엔드포인트는 아래 **심볼 카탈로그**의 8종 심볼만 지원하며, 카탈로그에 없는 심볼은 400 `unsupported-symbol` 로 응답합니다.\n개별 종목(예: `005930`, `AAPL`)의 시세는 본 그룹이 아닌 Market Data 그룹(`GET /api/v1/prices`, `/candles`)을 사용하세요.\n\n#### 심볼 카탈로그\n\n| 심볼 | 명칭 | 자산 유형 | 표시 단위 | 비고 |\n|------|------|----------|----------|------|\n| `KOSPI` | 코스피 | `INDEX` | 포인트 | 투자자별 매매대금 지원 |\n| `KOSDAQ` | 코스닥 | `INDEX` | 포인트 | 투자자별 매매대금 지원 |\n| `KR_BOND_2Y` | 한국 국채 2년 | `BOND` | % | 수익률(금리), 예: `3.25` = 3.25% |\n| `KR_BOND_3Y` | 한국 국채 3년 | `BOND` | % | |\n| `KR_BOND_5Y` | 한국 국채 5년 | `BOND` | % | |\n| `KR_BOND_10Y` | 한국 국채 10년 | `BOND` | % | |\n| `KR_BOND_20Y` | 한국 국채 20년 | `BOND` | % | |\n| `KR_BOND_30Y` | 한국 국채 30년 | `BOND` | % | |\n\n> 캔들 차트(`/candles`)의 분봉(`1m`)은 지수(`KOSPI`·`KOSDAQ`)만 지원합니다. 국채(`KR_BOND_*`)는 일봉(`1d`)만 지원하며, 분봉 요청 시 400 `invalid-request` 로 응답합니다."
     },
     {
       "name": "Account",
@@ -2182,7 +2182,7 @@
           "Market Indicators"
         ],
         "summary": "시장 지표 캔들 차트 조회",
-        "description": "시장 지표(국내 지수·국채)의 캔들(OHLCV) 차트 데이터를 조회합니다. 최대 200개 봉을 반환합니다.\n\n지원 심볼은 그룹 상단 **Market Indicators** 설명의 심볼 카탈로그(8종)와 동일하며, 카탈로그에 없는 심볼은\n400 `unsupported-symbol` 로 응답합니다. 개별 종목의 캔들은 `GET /api/v1/candles` 를 사용하세요.\n\n**Rate Limits Group**: `MARKET_INDICATOR_CHART`\n",
+        "description": "시장 지표(국내 지수·국채)의 캔들(OHLCV) 차트 데이터를 조회합니다. 최대 200개 봉을 반환합니다.\n\n지원 심볼은 그룹 상단 **Market Indicators** 설명의 심볼 카탈로그(8종)와 동일하며, 카탈로그에 없는 심볼은\n400 `unsupported-symbol` 로 응답합니다. 개별 종목의 캔들은 `GET /api/v1/candles` 를 사용하세요.\n\n분봉(`1m`)은 지수(`KOSPI`·`KOSDAQ`)만 지원합니다. 국채(`KR_BOND_*`)는 일봉(`1d`)만 지원하며, 분봉 요청 시\n400 `invalid-request` 로 응답합니다.\n\n**Rate Limits Group**: `MARKET_INDICATOR_CHART`\n",
         "operationId": "getMarketIndicatorCandles",
         "security": [
           {
@@ -2214,7 +2214,7 @@
             "name": "interval",
             "in": "query",
             "required": true,
-            "description": "봉 단위",
+            "description": "봉 단위. `1m`(분봉)은 지수(`KOSPI`·`KOSDAQ`)만 지원하고, 국채(`KR_BOND_*`)는 `1d`(일봉)만 지원합니다.\n",
             "schema": {
               "type": "string",
               "enum": [
@@ -2358,6 +2358,22 @@
                           "field": "interval",
                           "allowedValues": [
                             "1m",
+                            "1d"
+                          ]
+                        }
+                      }
+                    }
+                  },
+                  "bondMinuteNotSupported": {
+                    "summary": "국채 분봉(1m) 미지원 — 일봉만 가능",
+                    "value": {
+                      "error": {
+                        "requestId": "01HXYZABCDEFG123456789",
+                        "code": "invalid-request",
+                        "message": "지원하지 않는 캔들 주기입니다.",
+                        "data": {
+                          "field": "interval",
+                          "allowedValues": [
                             "1d"
                           ]
                         }
