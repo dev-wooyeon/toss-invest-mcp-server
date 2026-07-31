@@ -166,7 +166,7 @@ MCP_ALLOWED_ORIGIN=https://client.example.com
 
 ## 제공 기능
 
-이 서버는 번들된 공식 OpenAPI 1.2.4의 `operationId`를 기준으로 29개 callable operation을 MCP 도구로 제공합니다. 토스증권 Open API의 기능과 실제 호출 가능한 MCP 도구가 어떻게 연결되는지는 아래 표에서 확인할 수 있습니다.
+이 서버는 번들된 공식 OpenAPI 1.2.5의 `operationId`를 기준으로 29개 callable operation을 MCP 도구로 제공합니다. 토스증권 Open API의 기능과 실제 호출 가능한 MCP 도구가 어떻게 연결되는지는 아래 표에서 확인할 수 있습니다.
 
 ### OpenAPI 기반 도구 매핑
 
