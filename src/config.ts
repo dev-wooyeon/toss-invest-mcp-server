@@ -1,14 +1,16 @@
 import { openapi } from "./spec.js";
+import { normalizeDecimal } from "./decimal.js";
 import type { TossConfig, TradingMode } from "./types.js";
+
+const OFFICIAL_BASE_URL = "https://openapi.tossinvest.com";
 
 export function getConfig(env: NodeJS.ProcessEnv = process.env): TossConfig {
   const tradingMode = parseTradingMode(env);
 
   return {
-    baseUrl:
-      env.TOSSINVEST_BASE_URL ??
-      openapi.servers?.[0]?.url ??
-      "https://openapi.tossinvest.com",
+    baseUrl: resolveBaseUrl(
+      env.TOSSINVEST_BASE_URL ?? openapi.servers?.[0]?.url ?? OFFICIAL_BASE_URL,
+    ),
     clientId: emptyToUndefined(env.TOSSINVEST_CLIENT_ID),
     clientSecret: emptyToUndefined(env.TOSSINVEST_CLIENT_SECRET),
     defaultAccount: emptyToUndefined(env.TOSSINVEST_ACCOUNT),
@@ -18,13 +20,20 @@ export function getConfig(env: NodeJS.ProcessEnv = process.env): TossConfig {
       maxRetries: parseInteger(env.TOSSINVEST_MAX_RETRIES, 2),
       baseDelayMs: parseInteger(env.TOSSINVEST_RETRY_BASE_DELAY_MS, 500),
       maxDelayMs: parseInteger(env.TOSSINVEST_RETRY_MAX_DELAY_MS, 5000),
+      requestTimeoutMs: parseIntegerInRange(
+        env.TOSSINVEST_REQUEST_TIMEOUT_MS,
+        15_000,
+        1_000,
+        120_000,
+        "TOSSINVEST_REQUEST_TIMEOUT_MS",
+      ),
     },
     tradingPolicy: {
       mode: tradingMode,
       allowedSymbols: parseCsv(env.TOSSINVEST_ALLOWED_SYMBOLS),
       blockedSymbols: parseCsv(env.TOSSINVEST_BLOCKED_SYMBOLS) ?? [],
-      maxOrderAmountKrw: parseNumber(env.TOSSINVEST_MAX_ORDER_AMOUNT_KRW),
-      maxOrderAmountUsd: parseNumber(env.TOSSINVEST_MAX_ORDER_AMOUNT_USD),
+      maxOrderAmountKrw: parseDecimal(env.TOSSINVEST_MAX_ORDER_AMOUNT_KRW),
+      maxOrderAmountUsd: parseDecimal(env.TOSSINVEST_MAX_ORDER_AMOUNT_USD),
       requireClientOrderId: env.TOSSINVEST_REQUIRE_CLIENT_ORDER_ID
         ? parseBoolean(env.TOSSINVEST_REQUIRE_CLIENT_ORDER_ID)
         : true,
@@ -85,15 +94,16 @@ function parseBoolean(value: string | undefined) {
 }
 
 function parseTradingMode(env: NodeJS.ProcessEnv): TradingMode {
-  if (parseBoolean(env.TOSSINVEST_ENABLE_TRADING)) {
-    return "LIVE_TRADING";
+  if (env.TOSSINVEST_TRADING_MODE !== undefined) {
+    const value = env.TOSSINVEST_TRADING_MODE.trim().toUpperCase();
+    if (value === "READ_ONLY" || value === "DRY_RUN" || value === "LIVE_TRADING") {
+      return value;
+    }
+    return "READ_ONLY";
   }
 
-  const value = (env.TOSSINVEST_TRADING_MODE ?? "READ_ONLY")
-    .trim()
-    .toUpperCase();
-  if (value === "READ_ONLY" || value === "DRY_RUN" || value === "LIVE_TRADING") {
-    return value;
+  if (parseBoolean(env.TOSSINVEST_ENABLE_TRADING)) {
+    return "LIVE_TRADING";
   }
   return "READ_ONLY";
 }
@@ -111,10 +121,63 @@ function parseInteger(value: string | undefined, fallback: number) {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
-function parseNumber(value: string | undefined) {
+function parseIntegerInRange(
+  value: string | undefined,
+  fallback: number,
+  min: number,
+  max: number,
+  name: string,
+) {
+  if (value === undefined || !value.trim()) {
+    return fallback;
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
+    throw new Error(`${name} must be an integer between ${min} and ${max}.`);
+  }
+  return parsed;
+}
+
+function parseDecimal(value: string | undefined) {
   if (!value || !value.trim()) {
     return undefined;
   }
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+  return normalizeDecimal(value.trim());
+}
+
+function resolveBaseUrl(value: string) {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("TOSSINVEST_BASE_URL must be a valid absolute URL.");
+  }
+
+  const hasUnexpectedParts =
+    Boolean(url.username || url.password || url.search || url.hash) ||
+    url.pathname !== "/";
+  if (hasUnexpectedParts) {
+    throw new Error(
+      "TOSSINVEST_BASE_URL must not include credentials, a path, query, or fragment.",
+    );
+  }
+
+  if (url.origin === OFFICIAL_BASE_URL) {
+    return OFFICIAL_BASE_URL;
+  }
+
+  if (
+    (url.protocol === "http:" || url.protocol === "https:") &&
+    isLoopbackHost(url.hostname)
+  ) {
+    return url.origin;
+  }
+
+  throw new Error(
+    "TOSSINVEST_BASE_URL must use https://openapi.tossinvest.com. HTTP(S) overrides are allowed only for a loopback test server.",
+  );
+}
+
+function isLoopbackHost(host: string) {
+  return ["127.0.0.1", "localhost", "::1", "[::1]"].includes(host);
 }

@@ -1,5 +1,17 @@
-import { accountSeqFromArgs, resolveParameter, resolveRequestBody } from "./spec.js";
-import { assertLiveTradingPolicy } from "./policy.js";
+import {
+  accountSeqFromArgs,
+  getOperation,
+  resolveParameter,
+  resolveRequestBody,
+} from "./spec.js";
+import {
+  assertConditionalOrderPolicy,
+  assertLiveTradingConfiguration,
+  assertLiveTradingPolicy,
+  assertOrderModificationPolicy,
+  parseOrderDraft,
+} from "./policy.js";
+import { isPositiveDecimal } from "./decimal.js";
 import type { CallArgs, OperationRecord, TossConfig } from "./types.js";
 
 type TokenState = {
@@ -15,6 +27,8 @@ export type TossResponse = {
   body: unknown;
   error?: NormalizedApiError;
   attempts: number;
+  outcomeUnknown?: boolean;
+  submissionPhase?: "submission_started" | "response_received";
 };
 
 export type NormalizedApiError = {
@@ -45,14 +59,14 @@ export class TossInvestClient {
 
     if (record.isTradingMutation) {
       assertTradingAllowed(this.config, args);
-      if (record.operation.operationId === "createOrder") {
-        assertLiveTradingPolicy(this.config, args.body);
-      }
+      assertLiveTradingConfiguration(this.config);
+      await this.assertMutationPolicy(record, args);
     }
 
-    const url = buildUrl(this.config.baseUrl, record, args);
+    const url = buildOperationUrl(this.config.baseUrl, record, args);
+    const accessToken = await this.getAccessToken();
     const headers: Record<string, string> = {
-      Authorization: `Bearer ${await this.getAccessToken()}`,
+      Authorization: `Bearer ${accessToken}`,
     };
 
     if (record.requiresAccount) {
@@ -76,12 +90,174 @@ export class TossInvestClient {
       init.body = JSON.stringify(args.body ?? {});
     }
 
-    return this.fetchWithRetry(url, init);
+    // Toss Invest retains create-order idempotency keys for only 10 minutes.
+    // Never automatically retry a mutation after an ambiguous 429/5xx response:
+    // a delayed retry could outlive that window and create a duplicate order.
+    const retryableRequest = !record.isTradingMutation;
+    const response = await this.sendOperationRequest(
+      record,
+      args,
+      url,
+      init,
+      retryableRequest,
+    );
+    if (!shouldRefreshAccessToken(response)) {
+      return response;
+    }
+
+    const refreshedToken = await this.getAccessToken({
+      forceRefresh: true,
+      usedToken: accessToken,
+    });
+    headers.Authorization = `Bearer ${refreshedToken}`;
+    const retryResponse = await this.sendOperationRequest(
+      record,
+      args,
+      url,
+      init,
+      retryableRequest,
+    );
+    return classifyMutationOutcome(record, args, {
+      ...retryResponse,
+      attempts: response.attempts + retryResponse.attempts,
+    });
   }
 
-  private async getAccessToken() {
-    if (this.token && this.token.expiresAt - 30_000 > Date.now()) {
-      return this.token.accessToken;
+  private async assertMutationPolicy(
+    record: OperationRecord,
+    args: CallArgs,
+  ) {
+    const operationId = record.operation.operationId;
+    if (operationId === "createOrder") {
+      const order = parseOrderDraft(args.body);
+      const quote = await this.fetchReferenceQuote(order.symbol);
+      assertLiveTradingPolicy(this.config, args.body, {
+        referencePrice: quote.price,
+        referenceCurrency: quote.currency,
+      });
+      return;
+    }
+    if (operationId === "createConditionalOrder") {
+      const symbol = bodySymbol(args.body, "Conditional order");
+      const quote = await this.fetchReferenceQuote(symbol);
+      assertConditionalOrderPolicy(this.config, args.body, {
+        requireClientOrderId: true,
+        referenceCurrency: quote.currency,
+        currentPrice: quote.price,
+      });
+      return;
+    }
+    if (operationId === "modifyOrder") {
+      const currentOrder = await this.fetchResourceResult("getOrder", args);
+      const symbol = resultSymbol(currentOrder, "Order modification");
+      const quote = await this.fetchReferenceQuote(symbol);
+      assertOrderModificationPolicy(this.config, currentOrder, args.body, {
+        referencePrice: quote.price,
+        referenceCurrency: quote.currency,
+      });
+      return;
+    }
+    if (operationId === "modifyConditionalOrder") {
+      const currentOrder = await this.fetchResourceResult(
+        "getConditionalOrder",
+        args,
+      );
+      const symbol = resultSymbol(currentOrder, "Conditional order modification");
+      const quote = await this.fetchReferenceQuote(symbol);
+      assertConditionalOrderPolicy(this.config, args.body, {
+        symbol,
+        requireClientOrderId: false,
+        referenceCurrency: quote.currency,
+        currentPrice: quote.price,
+      });
+      return;
+    }
+    if (["cancelOrder", "cancelConditionalOrder"].includes(operationId)) {
+      return;
+    }
+    throw new Error(
+      `Live mutation ${operationId} has no local trading-policy handler and is blocked by default.`,
+    );
+  }
+
+  private async fetchResourceResult(operationId: string, args: CallArgs) {
+    const operation = getOperation(operationId);
+    if (!operation) {
+      throw new Error(`Required policy lookup operation is unavailable: ${operationId}`);
+    }
+    const response = await this.callOperation(operation, args);
+    if (!response.ok) {
+      throw new Error(
+        `Trading policy lookup ${operationId} failed with HTTP ${response.status}: ${response.error?.message ?? "unknown error"}`,
+      );
+    }
+    if (!isObject(response.body) || !("result" in response.body)) {
+      throw new Error(`Trading policy lookup ${operationId} returned no result.`);
+    }
+    return response.body.result;
+  }
+
+  private async sendOperationRequest(
+    record: OperationRecord,
+    args: CallArgs,
+    url: URL,
+    init: RequestInit,
+    retryableRequest: boolean,
+  ) {
+    try {
+      const response = await this.fetchWithRetry(url, init, { retryableRequest });
+      return classifyMutationOutcome(record, args, response);
+    } catch (error) {
+      if (!record.isTradingMutation) {
+        throw error;
+      }
+      return mutationTransportOutcome(error);
+    }
+  }
+
+  private async fetchReferenceQuote(symbol: string) {
+    const result = await this.fetchResourceResult("getPrices", { symbols: symbol });
+    if (!Array.isArray(result)) {
+      throw new Error("Trading policy price lookup returned a malformed result.");
+    }
+    const matches = result.filter(
+      (item) =>
+        isObject(item) &&
+        stringOrUndefined(item.symbol)?.toUpperCase() === symbol.toUpperCase(),
+    );
+    if (matches.length !== 1) {
+      throw new Error(
+        `Trading policy price lookup must return exactly one row for ${symbol}.`,
+      );
+    }
+    const row = matches[0];
+    const price = stringOrUndefined(row.lastPrice);
+    const currency = stringOrUndefined(row.currency);
+    if (!price || !isPositiveDecimal(price)) {
+      throw new Error(`Trading policy price lookup returned no valid price for ${symbol}.`);
+    }
+    if (currency !== "KRW" && currency !== "USD") {
+      throw new Error(
+        `Trading policy price lookup returned an unsupported currency for ${symbol}.`,
+      );
+    }
+    return { price, currency: currency as "KRW" | "USD" };
+  }
+
+  private async getAccessToken(
+    options: { forceRefresh?: boolean; usedToken?: string } = {},
+  ) {
+    const cachedToken = this.usableCachedToken(options);
+    if (cachedToken) {
+      return cachedToken.accessToken;
+    }
+
+    if (
+      options.forceRefresh &&
+      options.usedToken &&
+      this.token?.accessToken === options.usedToken
+    ) {
+      this.token = undefined;
     }
 
     if (this.tokenRefresh) {
@@ -112,16 +288,24 @@ export class TossInvestClient {
     const response = await this.fetchWithRetry(
       new URL("/oauth2/token", this.config.baseUrl),
       {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body,
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body,
       },
       { authRequest: true },
     );
 
     if (!response.ok) {
+      const oauthError = isObject(response.body)
+        ? stringOrUndefined(response.body.error)
+        : undefined;
+      if (response.status === 403 && oauthError === "access_denied") {
+        throw new Error(
+          "Toss Invest OAuth token request was denied because this server's source IP is not allowlisted. Register the host egress IP in Toss Securities WTS > Open API > Allowed IP management.",
+        );
+      }
       throw new Error(
         `Toss Invest OAuth token request failed with HTTP ${response.status}: ${safeJson(response.body, this.config)}`,
       );
@@ -141,20 +325,42 @@ export class TossInvestClient {
     return this.token.accessToken;
   }
 
+  private usableCachedToken(options: {
+    forceRefresh?: boolean;
+    usedToken?: string;
+  }) {
+    const token = this.token;
+    if (!token || token.expiresAt - 30_000 <= Date.now()) {
+      return undefined;
+    }
+    const canUseToken =
+      !options.forceRefresh ||
+      Boolean(options.usedToken && token.accessToken !== options.usedToken);
+    return canUseToken ? token : undefined;
+  }
+
   private async fetchWithRetry(
     url: URL,
     init: RequestInit,
-    options: { authRequest?: boolean } = {},
+    options: { authRequest?: boolean; retryableRequest?: boolean } = {},
   ): Promise<TossResponse> {
-    const maxRetries = options.authRequest
+    const configuredRetries = options.authRequest
       ? Math.min(this.config.retry.maxRetries, 1)
       : this.config.retry.maxRetries;
+    const maxRetries = options.retryableRequest === false ? 0 : configuredRetries;
     let attempt = 0;
     let response: TossResponse | undefined;
 
     while (attempt <= maxRetries) {
       attempt += 1;
-      response = await this.parseFetchResponse(await fetch(url, init), attempt);
+      const timeoutSignal = AbortSignal.timeout(this.config.retry.requestTimeoutMs);
+      const signal = init.signal
+        ? AbortSignal.any([init.signal, timeoutSignal])
+        : timeoutSignal;
+      response = await this.parseFetchResponse(
+        await fetch(url, { ...init, signal }),
+        attempt,
+      );
       if (!shouldRetry(response) || attempt > maxRetries) {
         return response;
       }
@@ -187,7 +393,11 @@ export class TossInvestClient {
   }
 }
 
-function buildUrl(baseUrl: string, record: OperationRecord, args: CallArgs) {
+export function buildOperationUrl(
+  baseUrl: string,
+  record: OperationRecord,
+  args: CallArgs,
+) {
   let path = record.path;
   const query = new URLSearchParams();
 
@@ -246,6 +456,7 @@ function pickResponseHeaders(headers: Headers) {
     "x-ratelimit-remaining",
     "x-ratelimit-reset",
     "retry-after",
+    "www-authenticate",
   ];
   const result: Record<string, string> = {};
   for (const key of allowed) {
@@ -301,6 +512,109 @@ function shouldRetry(response: TossResponse) {
   return response.status === 429 || response.status >= 500;
 }
 
+function shouldRefreshAccessToken(response: TossResponse) {
+  if (response.status !== 401) {
+    return false;
+  }
+  return ["invalid-token", "expired-token"].includes(response.error?.code ?? "");
+}
+
+function classifyMutationOutcome(
+  record: OperationRecord,
+  args: CallArgs,
+  response: TossResponse,
+): TossResponse {
+  if (!record.isTradingMutation) {
+    return response;
+  }
+
+  const malformedSuccess = response.ok
+    ? mutationSuccessError(record.operation.operationId, args, response)
+    : undefined;
+  const outcomeUnknown = Boolean(
+    response.outcomeUnknown === true ||
+      malformedSuccess ||
+      response.status === 429 ||
+      response.status >= 500 ||
+      response.error?.code === "request-in-progress",
+  );
+  if (malformedSuccess) {
+    return {
+      ...response,
+      ok: false,
+      error: {
+        code: "mutation-outcome-unknown",
+        message: malformedSuccess,
+        status: response.status,
+      },
+      outcomeUnknown: true,
+      submissionPhase: "response_received",
+    };
+  }
+  return {
+    ...response,
+    outcomeUnknown,
+    submissionPhase: response.submissionPhase ?? "response_received",
+  };
+}
+
+function mutationSuccessError(
+  operationId: string,
+  args: CallArgs,
+  response: TossResponse,
+) {
+  if (operationId === "cancelConditionalOrder") {
+    return response.status === 204 && response.body === null
+      ? undefined
+      : "Toss Invest returned an unexpected success response for cancelConditionalOrder; the mutation outcome is unknown and must be reconciled before retrying.";
+  }
+
+  const result = isObject(response.body) && isObject(response.body.result)
+    ? response.body.result
+    : undefined;
+  const idField = operationId.includes("Conditional")
+    ? "conditionalOrderId"
+    : "orderId";
+  if (!result || !stringOrUndefined(result[idField])) {
+    return `Toss Invest returned HTTP success for ${operationId} without a valid ${idField}; the mutation outcome is unknown and must be reconciled before retrying.`;
+  }
+  if (["createOrder", "createConditionalOrder"].includes(operationId)) {
+    const requestedClientOrderId = isObject(args.body)
+      ? stringOrUndefined(args.body.clientOrderId)
+      : undefined;
+    const returnedClientOrderId = stringOrUndefined(result.clientOrderId);
+    if (
+      requestedClientOrderId &&
+      returnedClientOrderId !== requestedClientOrderId
+    ) {
+      return `Toss Invest returned HTTP success for ${operationId} with a missing or mismatched clientOrderId; the mutation outcome is unknown and must be reconciled before retrying.`;
+    }
+  }
+  return undefined;
+}
+
+function mutationTransportOutcome(error: unknown): TossResponse {
+  return {
+    ok: false,
+    status: 0,
+    statusText: "Transport Error",
+    headers: {},
+    body: null,
+    error: {
+      code: "mutation-outcome-unknown",
+      message:
+        "The trading mutation transport failed after submission began. The execution outcome is unknown; reconcile account orders before retrying.",
+      data: {
+        cause: error instanceof Error ? error.name : "UnknownError",
+      },
+      status: 0,
+    },
+    attempts: 1,
+    outcomeUnknown: true,
+    submissionPhase: "submission_started",
+  };
+}
+
 function retryDelayMs(response: TossResponse, attempt: number, config: TossConfig) {
   const retryAfter = Number(response.headers["retry-after"]);
   if (Number.isFinite(retryAfter) && retryAfter >= 0) {
@@ -320,6 +634,27 @@ function sleep(ms: number) {
 
 function stringOrUndefined(value: unknown) {
   return typeof value === "string" && value ? value : undefined;
+}
+
+function bodySymbol(body: unknown, label: string) {
+  if (!isObject(body)) {
+    throw new Error(`${label} body must be an object.`);
+  }
+  const symbol = stringOrUndefined(body.symbol)?.toUpperCase();
+  if (!symbol) {
+    throw new Error(`${label} body requires symbol.`);
+  }
+  return symbol;
+}
+
+function resultSymbol(value: unknown, label: string) {
+  const symbol = isObject(value)
+    ? stringOrUndefined(value.symbol)?.toUpperCase()
+    : undefined;
+  if (!symbol) {
+    throw new Error(`${label} policy could not resolve the current symbol.`);
+  }
+  return symbol;
 }
 
 function safeJson(value: unknown, config: TossConfig) {
