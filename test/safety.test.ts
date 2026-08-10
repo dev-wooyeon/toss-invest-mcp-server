@@ -1271,6 +1271,98 @@ test("preflight is not ready when cash, market, warnings, and open orders block 
   }
 });
 
+test("preflight blocks US fractional orders in the last regular-market hour", async () => {
+  const config = getConfig({
+    TOSSINVEST_BASE_URL: "https://openapi.tossinvest.com",
+    TOSSINVEST_CLIENT_ID: "client-id",
+    TOSSINVEST_CLIENT_SECRET: "client-secret",
+    TOSSINVEST_ACCOUNT: "1",
+    TOSSINVEST_TRADING_MODE: "DRY_RUN",
+    TOSSINVEST_ALLOWED_SYMBOLS: "AAPL",
+    TOSSINVEST_MAX_ORDER_AMOUNT_USD: "1000000",
+    TOSSINVEST_ALLOW_MARKET_ORDER_WITHOUT_PRICE: "true",
+    TOSSINVEST_MAX_RETRIES: "0",
+  });
+  const client = new TossInvestClient(config);
+  const originalFetch = globalThis.fetch;
+  const now = Date.now();
+
+  globalThis.fetch = (async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/oauth2/token") {
+      return jsonResponse(200, { access_token: "valid-token", expires_in: 3600 });
+    }
+    if (url.pathname === "/api/v1/stocks") {
+      return jsonResponse(200, {
+        result: [{ symbol: "AAPL", status: "ACTIVE", currency: "USD" }],
+      });
+    }
+    if (url.pathname === "/api/v1/prices") {
+      return jsonResponse(200, {
+        result: [{ symbol: "AAPL", lastPrice: "200", currency: "USD" }],
+      });
+    }
+    if (url.pathname === "/api/v1/price-limits") {
+      return jsonResponse(200, {
+        result: {
+          currency: "USD",
+          lowerLimitPrice: "1",
+          upperLimitPrice: "1000",
+        },
+      });
+    }
+    if (url.pathname.endsWith("/warnings")) {
+      return jsonResponse(200, { result: [] });
+    }
+    if (url.pathname === "/api/v1/commissions") {
+      return jsonResponse(200, {
+        result: [{ marketCountry: "US", commissionRate: "0.01" }],
+      });
+    }
+    if (url.pathname === "/api/v1/sellable-quantity") {
+      return jsonResponse(200, { result: { sellableQuantity: "1" } });
+    }
+    if (url.pathname === "/api/v1/market-calendar/US") {
+      return jsonResponse(200, {
+        result: {
+          today: {
+            regularMarket: {
+              startTime: new Date(now - 60 * 60 * 1000).toISOString(),
+              endTime: new Date(now + 30 * 60 * 1000).toISOString(),
+            },
+          },
+        },
+      });
+    }
+    if (url.pathname === "/api/v1/orders") {
+      return jsonResponse(200, { result: { orders: [] } });
+    }
+    throw new Error(`Unexpected mock route: ${url.pathname}`);
+  }) as typeof fetch;
+
+  try {
+    const result = await orderPreflight(
+      { client, config },
+      {
+        body: {
+          clientOrderId: "fractional-last-hour",
+          symbol: "AAPL",
+          side: "SELL",
+          orderType: "MARKET",
+          quantity: "0.5",
+        },
+      },
+    );
+    assert.equal(result.summary.readyForLiveOrder, false);
+    assert.match(
+      result.summary.blockingIssues.join(" "),
+      /one hour before regular market close/,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("preflight fails closed for empty, malformed, or wrong-currency 200 payloads", async () => {
   const config = getConfig({
     TOSSINVEST_BASE_URL: "https://openapi.tossinvest.com",

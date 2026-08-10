@@ -523,10 +523,11 @@ function preflightSemanticIssues(
 
   const regularOnly = Boolean(order.orderAmount) ||
     Boolean(order.quantity?.includes("."));
-  if (!isMarketSessionOpen(checks.calendar.result, regularOnly)) {
+  const closeCutoffMinutes = regularOnly ? 60 : 0;
+  if (!isMarketSessionOpen(checks.calendar.result, regularOnly, closeCutoffMinutes)) {
     issues.push(
       regularOnly
-        ? "The regular market session is closed for this order type."
+        ? "This order type is available only from regular market open until one hour before regular market close."
         : "No supported market session is currently open.",
     );
   }
@@ -555,7 +556,11 @@ function preflightSemanticIssues(
   return issues;
 }
 
-function isMarketSessionOpen(value: unknown, regularOnly: boolean) {
+function isMarketSessionOpen(
+  value: unknown,
+  regularOnly: boolean,
+  closeCutoffMinutes = 0,
+) {
   const result = recordOrUndefined(value);
   if (!result) {
     return false;
@@ -573,7 +578,13 @@ function isMarketSessionOpen(value: unknown, regularOnly: boolean) {
     const session = recordOrUndefined(market[name]);
     const start = session ? Date.parse(String(session.startTime ?? "")) : Number.NaN;
     const end = session ? Date.parse(String(session.endTime ?? "")) : Number.NaN;
-    return Number.isFinite(start) && Number.isFinite(end) && start <= now && now <= end;
+    const cutoffEnd = end - closeCutoffMinutes * 60 * 1000;
+    return (
+      Number.isFinite(start) &&
+      Number.isFinite(cutoffEnd) &&
+      start <= now &&
+      now <= cutoffEnd
+    );
   });
 }
 

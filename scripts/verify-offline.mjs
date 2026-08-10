@@ -46,6 +46,11 @@ const EXPECTED_TOOLS = [
   "toss_invest_get_prices",
   "toss_invest_get_rankings",
   "toss_invest_get_sellable_quantity",
+  "toss_invest_get_stock_credit_trades",
+  "toss_invest_get_stock_investor_trading",
+  "toss_invest_get_stock_program_trades",
+  "toss_invest_get_stock_securities_lending",
+  "toss_invest_get_stock_short_selling",
   "toss_invest_get_stock_warnings",
   "toss_invest_get_stocks",
   "toss_invest_get_trades",
@@ -184,6 +189,24 @@ const mockApi = createServer(async (req, res) => {
       result: blockingScenario
         ? [{ warningType: "OVERHEATED", exchange: "KRX" }]
         : [],
+    });
+    return;
+  }
+
+  if (
+    [
+      "/api/v1/stocks/005930/investor-trading",
+      "/api/v1/stocks/005930/program-trades",
+      "/api/v1/stocks/005930/short-selling",
+      "/api/v1/stocks/005930/securities-lending",
+      "/api/v1/stocks/005930/credit-trades",
+    ].includes(url.pathname)
+  ) {
+    json(res, 200, {
+      result: {
+        nextUntil: null,
+        records: [],
+      },
     });
     return;
   }

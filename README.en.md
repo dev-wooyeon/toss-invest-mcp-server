@@ -184,7 +184,7 @@ Live trading is blocked by default. The intended flow is: read account and marke
 
 ### OpenAPI-based tools
 
-Tools are generated from the 29 callable operation IDs in the bundled official OpenAPI 1.2.5 document:
+Tools are generated from the 34 callable operation IDs in the bundled official OpenAPI 1.2.13 document:
 
 - `toss_invest_get_orderbook`
 - `toss_invest_get_prices`
@@ -193,6 +193,11 @@ Tools are generated from the 29 callable operation IDs in the bundled official O
 - `toss_invest_get_candles`
 - `toss_invest_get_stocks`
 - `toss_invest_get_stock_warnings`
+- `toss_invest_get_stock_investor_trading`
+- `toss_invest_get_stock_program_trades`
+- `toss_invest_get_stock_short_selling`
+- `toss_invest_get_stock_securities_lending`
+- `toss_invest_get_stock_credit_trades`
 - `toss_invest_get_exchange_rate`
 - `toss_invest_get_kr_market_calendar`
 - `toss_invest_get_us_market_calendar`

@@ -29,15 +29,23 @@ const NEW_IN_1_2_2 = [
   "modifyConditionalOrder",
 ] as const;
 
+const NEW_IN_1_2_13 = [
+  "getStockInvestorTrading",
+  "getStockProgramTrades",
+  "getStockShortSelling",
+  "getStockSecuritiesLending",
+  "getStockCreditTrades",
+] as const;
+
 const CONDITIONAL_ORDER_MUTATIONS = [
   "createConditionalOrder",
   "modifyConditionalOrder",
   "cancelConditionalOrder",
 ] as const;
 
-test("bundled OpenAPI 1.2.5 indexes every official operation", () => {
+test("bundled OpenAPI 1.2.13 indexes every official operation", () => {
   assert.equal(openapi.openapi, "3.1.0");
-  assert.equal(openapi.info.version, "1.2.5");
+  assert.equal(openapi.info.version, "1.2.13");
 
   const documentOperationIds = Object.values(openapi.paths)
     .flatMap((pathItem) => Object.values(pathItem))
@@ -53,7 +61,7 @@ test("bundled OpenAPI 1.2.5 indexes every official operation", () => {
 
   assert.deepEqual(indexedOperationIds, documentOperationIds);
   assert.equal(new Set(indexedOperationIds).size, indexedOperationIds.length);
-  for (const operationId of NEW_IN_1_2_2) {
+  for (const operationId of [...NEW_IN_1_2_2, ...NEW_IN_1_2_13]) {
     assert.ok(getOperation(operationId), `${operationId} must be indexed`);
   }
 });

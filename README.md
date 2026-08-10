@@ -166,7 +166,7 @@ MCP_ALLOWED_ORIGIN=https://client.example.com
 
 ## 제공 기능
 
-이 서버는 번들된 공식 OpenAPI 1.2.5의 `operationId`를 기준으로 29개 callable operation을 MCP 도구로 제공합니다. 토스증권 Open API의 기능과 실제 호출 가능한 MCP 도구가 어떻게 연결되는지는 아래 표에서 확인할 수 있습니다.
+이 서버는 번들된 공식 OpenAPI 1.2.13의 `operationId`를 기준으로 34개 callable operation을 MCP 도구로 제공합니다. 토스증권 Open API의 기능과 실제 호출 가능한 MCP 도구가 어떻게 연결되는지는 아래 표에서 확인할 수 있습니다.
 
 ### OpenAPI 기반 도구 매핑
 
@@ -180,6 +180,11 @@ MCP_ALLOWED_ORIGIN=https://client.example.com
 | 캔들 차트 조회 | `getCandles` | `toss_invest_get_candles` | 조회 |
 | 종목 기본 정보 조회 | `getStocks` | `toss_invest_get_stocks` | 조회 |
 | 매수 유의사항 조회 | `getStockWarnings` | `toss_invest_get_stock_warnings` | 조회 |
+| 투자자별 매매동향 조회 | `getStockInvestorTrading` | `toss_invest_get_stock_investor_trading` | 조회 |
+| 프로그램매매 동향 조회 | `getStockProgramTrades` | `toss_invest_get_stock_program_trades` | 조회 |
+| 공매도 동향 조회 | `getStockShortSelling` | `toss_invest_get_stock_short_selling` | 조회 |
+| 대차거래 동향 조회 | `getStockSecuritiesLending` | `toss_invest_get_stock_securities_lending` | 조회 |
+| 신용거래 동향 조회 | `getStockCreditTrades` | `toss_invest_get_stock_credit_trades` | 조회 |
 | 환율 조회 | `getExchangeRate` | `toss_invest_get_exchange_rate` | 조회 |
 | 국내 장 운영 정보 조회 | `getKrMarketCalendar` | `toss_invest_get_kr_market_calendar` | 조회 |
 | 해외 장 운영 정보 조회 | `getUsMarketCalendar` | `toss_invest_get_us_market_calendar` | 조회 |
